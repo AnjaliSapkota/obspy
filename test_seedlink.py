@@ -10,23 +10,28 @@ from obspy.signal.trigger import classic_sta_lta
 
 # client.connect()
 
-stream = Stream()
-
 start = UTCDateTime()
 
 plt.ion()
 fig, (ax, ax2, ax3) = plt.subplots(3,1)
 
 class MyClient(EasySeedLinkClient):
+    def __init__(self, *args, **kwargs):
+
+        super().__init__(*args, **kwargs)
+
+        self.stream = Stream()
+
     def on_data(self, trace):
-        global stream
-        stream = stream + trace
-        stream.merge()
+        trace.detrend("demean")
 
-        stream.trim(starttime = stream[-1].stats.endtime - 10,
-                    endtime = stream[-1].stats.endtime)
+        self.stream = self.stream + trace
+        self.stream.merge()
 
-        data = stream[0].data
+        self.stream.trim(starttime = self.stream[-1].stats.endtime - 10,
+                    endtime = self.stream[-1].stats.endtime)
+
+        data = self.stream[0].data
 
         peak = np.max(np.abs(data))
         rms = np.sqrt(np.mean(data ** 2))
@@ -41,12 +46,12 @@ class MyClient(EasySeedLinkClient):
         
         ax.clear()
 
-        ax.plot(stream[0].times(), stream[0].data)
+        ax.plot(self.stream[0].times(), self.stream[0].data)
         ax.set_title("Live seismic data")
         ax.set_xlabel("Time (seconds)")
         ax.set_ylabel("Amplitude")
 
-        sampling_rate = stream[0].stats.sampling_rate
+        sampling_rate = self.stream[0].stats.sampling_rate
         
         # Spectrogram
         ax2.clear()
@@ -152,4 +157,4 @@ client.select_stream("NP", "EQM22", "HNZ")
 client.run()
 
 
-print(stream)
+print(client.stream)
