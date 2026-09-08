@@ -13,28 +13,23 @@ from obspy.signal.trigger import classic_sta_lta
 start = UTCDateTime()
 
 plt.ion()
-fig, (ax, ax2, ax3) = plt.subplots(3,1, figsize=(10, 8))
+fig, (ax, fft, ax2, ax3, ) = plt.subplots(4,1, figsize=(10, 8))
 
 class MyClient(EasySeedLinkClient):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.stream = Stream() 
+        super().__init__(*args, **kwargs) # calls parent constructor, args and kwargs allows passing arbitary positional and keyword arguements
+        self.stream = Stream() # creats empty obspy stream
 
-    def on_data(self, trace):
+    def on_data(self, trace):       # when a new waveform packer arrives, on_data() method gets called
         self.stream = self.stream + trace
         self.stream.merge()
 
-        endtime = self.stream[-1].stats.endtime
-        self.stream.trim(starttime = endtime - 30)
+        endtime = self.stream[-1].stats.endtime     # latest time
+        self.stream.trim(starttime = endtime - 30)      # keep only 30 seconds, maintain sliding window
 
         tr = self.stream[0].copy()
-        tr.detrend("demean")
+        tr.detrend("demean")        # remove mean so that signal is centered around zero
         tr.detrend("linear")
-
-        data = tr.data
-        times = tr.times()
-
-        sampling_rate = tr.stats.sampling_rate
 
         # Taper
         tr.taper(max_percentage = 0.05, type = 'hann')
@@ -42,6 +37,11 @@ class MyClient(EasySeedLinkClient):
         tr.filter('bandpass', freqmin = 0.1, freqmax = 30)
         # Normalize
         tr.normalize()
+
+        data = tr.data
+        times = tr.times()
+
+        sampling_rate = tr.stats.sampling_rate
 
         # peak = np.max(np.abs(data))
         # rms = np.sqrt(np.mean(data ** 2))
@@ -62,6 +62,25 @@ class MyClient(EasySeedLinkClient):
         ax.set_xlabel("Time (seconds)")
         ax.set_ylabel("Amplitude")
         ax.set_xlim(times[0], times[-1])
+
+        fft.clear()
+        # FFT
+        n = len(data)
+
+        frequencies = np.fft.rfftfreq(n, d=1/sampling_rate)
+        spectrum = np.abs(np.fft.rfft(data))
+
+        # # ignore 0 hz component
+        frequencies = frequencies[1:]
+        spectrum = spectrum[1:]
+        fft.plot(frequencies, spectrum)
+        fft.set_title("FFT Spectrum")
+        fft.set_xlabel("Frequency (Hz)")
+        fft.set_ylabel("Amplitude")
+
+        # dominant_frequency = frequencies[np.argmax(spectrum)]
+
+        # print(f"Dominant frequency = {dominant_frequency:.2f} Hz")
 
         # Spectrogram
         ax2.clear()
