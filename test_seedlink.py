@@ -13,7 +13,7 @@ from obspy.signal.trigger import classic_sta_lta
 start = UTCDateTime()
 
 plt.ion()
-fig, (ax, fft, ax2, ax3, ) = plt.subplots(4,1, figsize=(10, 8))
+fig, (ax, ax_fft, ax2, ax3, ) = plt.subplots(4,1, figsize=(10, 8))
 
 class MyClient(EasySeedLinkClient):
     def __init__(self, *args, **kwargs):
@@ -25,16 +25,22 @@ class MyClient(EasySeedLinkClient):
         self.stream.merge()
 
         endtime = self.stream[-1].stats.endtime     # latest time
-        self.stream.trim(starttime = endtime - 30)      # keep only 30 seconds, maintain sliding window
+        self.stream.trim(starttime = endtime - 40)      # keep only 30 seconds, maintain sliding window
 
-        tr = self.stream[0].copy()
-        tr.detrend("demean")        # remove mean so that signal is centered around zero
-        tr.detrend("linear")
+        st = self.stream.copy()
+        st.detrend("demean")        # remove mean so that signal is centered around zero
+        st.detrend("linear")
 
         # Taper
-        tr.taper(max_percentage = 0.05, type = 'hann')
+        st.taper(max_percentage = 0.02, type = 'hann')
         # Filter
-        tr.filter('bandpass', freqmin = 0.1, freqmax = 30)
+        st.filter('bandpass', freqmin = 0.1, freqmax = 30)
+
+        st.trim(starttime = endtime - 30)
+
+        # extract single trace for plotting
+        tr = st[0]
+
         # Normalize
         tr.normalize()
 
@@ -63,7 +69,7 @@ class MyClient(EasySeedLinkClient):
         ax.set_ylabel("Amplitude")
         ax.set_xlim(times[0], times[-1])
 
-        fft.clear()
+        # fft.clear()
         # FFT
         n = len(data)
 
@@ -73,14 +79,28 @@ class MyClient(EasySeedLinkClient):
         # # ignore 0 hz component
         frequencies = frequencies[1:]
         spectrum = spectrum[1:]
-        fft.plot(frequencies, spectrum)
-        fft.set_title("FFT Spectrum")
-        fft.set_xlabel("Frequency (Hz)")
-        fft.set_ylabel("Amplitude")
+        # fft.plot(frequencies, spectrum)
+        # fft.set_title("FFT Spectrum")
+        # fft.set_xlabel("Frequency (Hz)")
+        # fft.set_ylabel("Amplitude")
 
-        # dominant_frequency = frequencies[np.argmax(spectrum)]
+        dom_freq = frequencies[np.argmax(spectrum)]
+        dom_amp = spectrum[np.argmax(spectrum)]
 
         # print(f"Dominant frequency = {dominant_frequency:.2f} Hz")
+
+        ax_fft.clear()
+        ax_fft.plot(frequencies, spectrum, color="tab:blue", linewidth=1.2, label="Spectrum")
+        
+        # Highlight dominant frequency with a red marker
+        ax_fft.plot(dom_freq, dom_amp, "ro", label=f"Peak: {dom_freq:.2f} Hz")
+
+        ax_fft.set_title(f"FFT Spectrum (Dominant: {dom_freq:.2f} Hz)")
+        ax_fft.set_xlabel("Frequency (Hz)")
+        ax_fft.set_ylabel("Amplitude")
+        ax_fft.set_xlim(0, sampling_rate / 2)  # Display up to Nyquist frequency
+        ax_fft.grid(True, linestyle=":", alpha=0.6)
+        ax_fft.legend(loc="upper right")
 
         # Spectrogram
         ax2.clear()
