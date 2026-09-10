@@ -52,47 +52,6 @@ frequencies, times, Sxx = spectrogram(
     noverlap=512
 )
 
-
-# pcm = ax2.pcolormesh(
-#     times,
-#     frequencies,
-#     10 * np.log10(Sxx + 1e-10),
-#     shading="gouraud", 
-#     cmap="magma"
-# )
-
-# ax2.set_xlabel("Time (seconds)")
-# ax2.set_ylabel("Frequency (Hz)")
-
-# ax2.set_title("Spectrogram")
-
-# # fig.colorbar(label="Power (dB)")
-
-# ax2.set_ylim(0, 10)
-
-# fig.colorbar(
-#     pcm,
-#     ax=ax2,
-#     label="Power (dB)"
-# )
-
-
-# plt.tight_layout()
-# plt.show()
-
-
-# # Combined Plot: Time Series Waveform & Spectrogram
-# fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), gridspec_kw={'height_ratios': [1, 2]}
-# )
-
-# # Top Subplot: Bandpass-Filtered Time-Series
-# ax1.plot(tr1.times(), tr1.data, color="black", lw=0.6)
-# ax1.set_ylabel("Counts")
-# ax1.set_title(f"{tr1.id} — Waveform & Spectrogram Analysis ({tr1.stats.starttime.strftime('%Y-%m-%d %H:%M:%S UTC')})")
-# ax1.grid(True, linestyle="--", alpha=0.5)
-
-# # Bottom Subplot: Spectrogram in Decibels (dB)
-
 pcm = ax2.pcolormesh(
     times, frequencies, 
     10 * np.log10(Sxx + 1e-10),  # Convert power spectrum to dB
