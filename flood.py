@@ -13,13 +13,15 @@ end   = UTCDateTime("2026-08-26T04:00:00")
 # baseline_start = UTCDateTime("2026-08-26T02:00:00")
 # baseline_end =  UTCDateTime("2026-08-26T04:30:00")
 
-st = client.get_waveforms(network="IO", station="EVN", location="*", channel="HHZ", starttime=start, endtime=end)
+# st = client.get_waveforms(network="IO", station="EVN", location="*", channel="HHZ", starttime=start, endtime=end)
+
+st = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
 
 st.merge(fill_value="latest")
 tr = st[0].copy()
 
-# tr.detrend("demean")
-# tr.detrend("linear")'
+tr.detrend("demean")
+tr.detrend("linear")
 # tr.filter("bandpass", freqmin=0.5, freqmax=10.0, corners=4, zerophase=True)
 
 # Print Trace Metadata
@@ -31,7 +33,7 @@ fs = tr.stats.sampling_rate
 data = tr.data.astype(float)
 t0 = tr.stats.starttime 
 
-win_sec = 60
+win_sec = 10
 
 
 win_len = int(win_sec * fs)
@@ -48,6 +50,7 @@ band_power = []
 sta_lta_values = []
 frequency_sta_lta_values = []
 lta_windows = 5
+
 
 for i in range(num_windows):
     start_index = i* win_len
@@ -98,7 +101,7 @@ for i in range(len(band_power)):
 
     if i >= lta_windows:
 
-        
+
         # Previous 5 windows = background 1–10 Hz power
         lta = np.mean(band_power[i-lta_windows:i])
 
@@ -119,123 +122,98 @@ for i in range(len(band_power)):
         frequency_sta_lta_values.append(0)
 
 
-fig, (ax1, ax2) = plt.subplots(2,1)
+# fig, (ax1, ax2) = plt.subplots(2,1)
 
-time_minutes = np.arange(len(sta_lta_values))
+# time_minutes = np.arange(len(sta_lta_values)) * win_sec / 60
 
-# plt.figure(figsize=(12, 5))
+# # plt.figure(figsize=(12, 5))
 
-ax1.plot(time_minutes, sta_lta_values)
+# ax1.plot(time_minutes, sta_lta_values)
 
-ax1.axhline(5,linestyle="--",label="STA/LTA threshold = 5")
+# ax1.axhline(5,linestyle="--",label="STA/LTA threshold = 5")
 
-ax1.set_xlabel("Minutes since 02:00 UTC")
-ax1.set_ylabel("STA/LTA")
-ax1.set_title("STA/LTA over time")
+# ax1.set_xlabel("Minutes since 02:00 UTC")
+# ax1.set_ylabel("STA/LTA")
+# ax1.set_title("STA/LTA over time")
 
-ax1.legend()
-ax1.grid()
-
-
-# frequency staa/lta
-
-frequency_time_minutes = np.arange(len(frequency_sta_lta_values))
-# plt.figure(figsize=(12, 5))
-
-ax2.plot(frequency_time_minutes, frequency_sta_lta_values)
-
-ax2.axhline(
-    5,
-    linestyle="--",
-    label="STA/LTA threshold = 5"
-)
-
-ax2.set_xlabel("Minutes since 02:00 UTC")
-ax2.set_ylabel("1-10 hz power STA/LTA")
-ax2.set_title("1-10 hz frequency band STA/LTA over time")
-
-ax2.legend()
-ax2.grid()
+# ax1.legend()
+# ax1.grid()
 
 
-plt.show()
+# # frequency staa/lta
 
-    # # energy ratio
-    # if total_energy > 0:
-    #     ratio = band_energy / total_energy
-    # else:
-    #     ratio = 0
+# frequency_time_minutes = np.arange(len(frequency_sta_lta_values)) * win_sec / 60
+# # plt.figure(figsize=(12, 5))
 
-    # frequency_ratios.append(ratio)
+# ax2.plot(frequency_time_minutes, frequency_sta_lta_values)
 
-#     #time
-#     current_time = (tr.stats.starttime + i* window)
+# ax2.axhline(
+#     5,
+#     linestyle="--",
+#     label="STA/LTA threshold = 5"
+# )
 
-#     window_times.append(current_time.datetime)
+# ax2.set_xlabel("Minutes since 02:00 UTC")
+# ax2.set_ylabel("1-10 hz power STA/LTA")
+# ax2.set_title("1-10 hz frequency band STA/LTA over time")
+
+# ax2.legend()
+# ax2.grid()
+
+
+# plt.show()
+
+
+
+#time
+time = np.arange(tr.stats.npts) / fs
+
 
 # #convert to numpy arrays
-# rms_values = np.array(rms_values)
+rms_values = np.array(rms_values)
 # frequency_ratios = np.array(frequency_ratios)
 # band_power = np.array(band_power)
 
+time_minutes = np.arange(len(rms_values)) * win_sec / 60
 
-# fig, (ax1, ax2) = plt.subplots(2,1,figsize=(14, 9),gridspec_kw={"height_ratios": [1, 2]})
 
-# # waveformm
+fig, (ax1, ax2) = plt.subplots(2,1,figsize=(14, 9),gridspec_kw={"height_ratios": [1, 2]})
 
-# ax1.plot(time, tr.data)
+# waveformm
 
-# ax1.set_xlabel("Time (seconds)")
-# ax1.set_ylabel("Amplitude")
+ax1.plot(time, tr.data)
 
-# ax1.set_title("Waveform")
+ax1.set_xlabel("Time")
+ax1.set_ylabel("Amplitude")
 
-# ax1.grid(True)
+ax1.set_title("Waveform")
 
-# # plt.tight_layout()
-# # plt.show()
-
-# # spectogram
-
-# frequencies, times, Sxx = spectrogram(
-#     tr.data,
-#     fs=fs,
-#     nperseg=1024,
-#     noverlap=512
-# )
-
-# pcm = ax2.pcolormesh(
-#     times, frequencies, 
-#     10 * np.log10(Sxx + 1e-10),  # Convert power spectrum to dB
-#     shading="gouraud", 
-#     cmap="magma"
-# )
-# ax2.set_ylabel("Frequency (Hz)")
-# ax2.set_xlabel("Time (seconds from start)")
-# # ax2.set_ylim(0, fs / 2)  # Up to Nyquist frequency
-# ax2.set_ylim(0, 20)
-# # Add Colorbar for Power Spectral Density
-# fig.colorbar(pcm, ax=ax2, label="Power (dB)")
+ax1.grid(True)
 
 # plt.tight_layout()
 # plt.show()
-time_minutes = np.arange(len(sta_lta_values))
 
-plt.figure(figsize=(12, 5))
+# spectogram
 
-plt.plot(time_minutes, sta_lta_values)
-
-plt.axhline(
-    5,
-    linestyle="--",
-    label="STA/LTA threshold = 5"
+frequencies, times, Sxx = spectrogram(
+    tr.data,
+    fs=fs,
+    nperseg=500 ,
+    noverlap=128
 )
 
-plt.xlabel("Minutes since 02:00 UTC")
-plt.ylabel("STA/LTA")
-plt.title("STA/LTA over time")
+pcm = ax2.pcolormesh(
+    times, frequencies, 
+    10 * np.log10(Sxx + 1e-10),  # Convert power spectrum to dB
+    shading="gouraud", 
+    cmap="magma"
+)
+ax2.set_ylabel("Frequency (Hz)")
+ax2.set_xlabel("Time (seconds from start)")
+# ax2.set_ylim(0, fs / 2)  # Up to Nyquist frequency
+ax2.set_ylim(0, 20)
+# Add Colorbar for Power Spectral Density
+fig.colorbar(pcm, ax=ax2, label="Power (dB)")
 
-plt.legend()
-plt.grid()
-
+plt.tight_layout()
 plt.show()
