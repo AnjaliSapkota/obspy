@@ -9,8 +9,8 @@ import matplotlib.dates as mdates
 client = Client("https://seiscomp.alertnepal.online")
 
 
-start = UTCDateTime("2026-08-26T02:50:00")
-end   = UTCDateTime("2026-08-26T02:58:00")
+start = UTCDateTime("2026-08-25T02:52:00")
+end   = UTCDateTime("2026-08-25T02:55:00")
 
 
 st_a = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
@@ -93,43 +93,43 @@ fs = tr_a.stats.sampling_rate
 time_a = tr_a.times("matplotlib")
 time_b = tr_b.times("matplotlib")
 
-# plt.figure(figsize=(14, 7))
+plt.figure(figsize=(14, 7))
 
-# plt.subplot(2, 1, 1)
+plt.subplot(2, 1, 1)
 
-# plt.plot(
-#     time_a,
-#     tr_a.data,
-# )
+plt.plot(
+    time_a,
+    tr_a.data,
+)
 
-# plt.ylabel("Amplitude")
-# plt.title("Station A: NK.KKN.*.BHZ")
-# # plt.legend()
-# plt.grid(True)
+plt.ylabel("Amplitude")
+plt.title("Station A: NK.KKN.*.BHZ")
+# plt.legend()
+plt.grid(True)
 
-# plt.gca().xaxis.set_major_formatter(
-#     mdates.DateFormatter("%H:%M:%S")
-# )
+plt.gca().xaxis.set_major_formatter(
+    mdates.DateFormatter("%H:%M:%S")
+)
 
-# plt.subplot(2, 1, 2)
+plt.subplot(2, 1, 2)
 
-# plt.plot(
-#     time_b,
-#     tr_b.data,
-# )
+plt.plot(
+    time_b,
+    tr_b.data,
+)
 
-# plt.xlabel("Time (seconds)")
-# plt.ylabel("Amplitude")
-# plt.title("Station B: IO.EVN.*.HHZ")
-# # plt.legend()
-# plt.grid(True)
+plt.xlabel("Time (seconds)")
+plt.ylabel("Amplitude")
+plt.title("Station B: IO.EVN.*.HHZ")
+# plt.legend()
+plt.grid(True)
 
-# plt.gca().xaxis.set_major_formatter(
-#     mdates.DateFormatter("%H:%M:%S")
-# )
+plt.gca().xaxis.set_major_formatter(
+    mdates.DateFormatter("%H:%M:%S")
+)
 
-# plt.tight_layout()
-# plt.show()
+plt.tight_layout()
+plt.show()
 
 
 

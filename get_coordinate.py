@@ -3,17 +3,18 @@ from obspy.clients.fdsn import Client
 client = Client("https://seiscomp.alertnepal.online")
 
 inventory = client.get_stations(
-    network="IO",
-    station="EVN",
+    network="NP",
     level="station"
 )
 
-print(inventory)
-
-station = inventory[0][0]
-
-print("Station:", station.code)
-print("Latitude:", station.latitude)
-print("Longitude:", station.longitude)
-print("Elevation:", station.elevation)
-
+for network in inventory:
+    for station in network:
+        print(
+            station.code,
+            "|",
+            station.latitude,
+            "|",
+            station.longitude,
+            "|",
+            station.elevation
+        )
