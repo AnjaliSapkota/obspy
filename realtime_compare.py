@@ -1,101 +1,162 @@
 from obspy import Stream
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
 import matplotlib.pyplot as plt
+from scipy.signal import welch
+from obspy.signal.cross_correlation import correlate, xcorr_max
+
 
 SERVER = "ring.wscada.net:18000"
 
-TARGETS = {
-    ("NP", "EQM23"): ["HNZ"],
-    ("NP", "EQM24"): ["HNZ"],
-}
+WINDOW = 60
 
-WINDOW_SEC = 60 
+stations = [
+    {"net": "NP", "sta": "EQM10", "cha": "HNZ"},
+    {"net": "NP", "sta": "EQM11", "cha": "HNZ"}
+]
 
+# Create plots
 plt.ion()
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-fig.tight_layout()
+fig, axes = plt.subplots(2, 2, figsize=(12, 7))
 
-STATION_AXES = {
-    "EQM23": ax1,
-    "EQM24": ax2,
-}
-
-
-class MultiStationClient(EasySeedLinkClient):
+class MyClient(EasySeedLinkClient):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.stream = Stream()
 
     def on_data(self, trace):
-        self.stream += trace
-        self.stream.merge(method=1)
+        if trace is None or trace.stats.npts == 0:
+            return
 
-        # Keep only the most recent WINDOW_SEC of data per trace so the
-        for tr in self.stream:
-            if tr.stats.endtime - tr.stats.starttime > WINDOW_SEC:
-                tr.trim(starttime=tr.stats.endtime - WINDOW_SEC)
+        try:
+            # 2. Append and merge incoming packet
+            self.stream += trace
+            self.stream.merge(method=1, fill_value="interpolate")
+
+            for tr in self.stream:
+                if tr.stats.endtime - tr.stats.starttime > WINDOW:
+                    tr.trim(starttime=tr.stats.endtime - WINDOW)
+
+            st = self.stream.copy()
+
+            st.detrend("demean").detrend("linear")
+            st.filter("bandpass", freqmin=0.1, freqmax=8.0, zerophase=True)
+
+        except Exception as e:
+            # Handle short windows or filtering errors gracefully
+            return
+
+        # Get the two stations
+        tr10 = st.select(network="NP", station="EQM10", channel="HNZ")
+        tr11 = st.select(network="NP", station="EQM11", channel="HNZ")
+
+        if len(tr10) == 0 or len(tr11) == 0:
+            return
+
+        tr10 = tr10[0]
+        tr11 = tr11[0]
+
+        # Make sure both have the same sampling rate
+        if tr10.stats.sampling_rate != tr11.stats.sampling_rate:
+            return
+
+        if tr10.stats.endtime - tr10.stats.starttime < WINDOW:
+            return
+
+        if tr11.stats.endtime - tr11.stats.starttime < WINDOW:
+            return
+
+        # Use the same number of samples
+        n = min(len(tr10.data), len(tr11.data))
+
+        data10 = tr10.data[-n:]
+        data11 = tr11.data[-n:]
+
+        # Cross-correlation
+        cc = correlate(data10, data11, int(10 * tr10.stats.sampling_rate))
+
+        # Find maximum correlation
+        shift, value = xcorr_max(cc)
+
+        # Convert samples to seconds
+        lag = shift / tr10.stats.sampling_rate
 
         print(
-            f"{trace.id:<15} | "
-            f"Start: {trace.stats.starttime.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]} | "
-            f"Samples: {trace.stats.npts:<4} | "
-            f"Rate: {trace.stats.sampling_rate} Hz"
-        )
+            f"EQM10 vs EQM11 | "
+            f"Lag: {lag:.3f} s | "
+            f"Correlation: {value:.3f}"
+        )      
 
-        st = self.stream.copy()
-        st.filter('bandpass', freqmin=0.5, freqmax=10)
+        # Update plots
+        for row, target in enumerate(stations):
 
-        self.update_plot(st)
+            ax_time = axes[row][0]
+            ax_freq = axes[row][1]
 
-    def update_plot(self, st):
-        for ax in (ax1, ax2):
-            ax.clear()
+            ax_time.clear()
+            ax_freq.clear()
 
-        for (net, sta), channels in TARGETS.items():
-            ax = STATION_AXES.get(sta)
-            if ax is None:
+            data = st.select(
+                network=target["net"],
+                station=target["sta"],
+                channel=target["cha"]
+            )
+
+            if len(data) == 0:
                 continue
 
-            sub = st.select(network=net, station=sta)
-            if len(sub) == 0:
-                continue
+            tr = data[0]
 
-            for cha in channels:
-                tr = sub.select(channel=cha)
-                if len(tr) == 0:
-                    continue
-                tr = tr[0]
-                ax.plot(
-                    tr.times("matplotlib"),
-                    tr.data,
-                    label=cha,
-                    linewidth=0.8,
-                )
+            # Waveform - time domain
+            ax_time.plot(tr.times(), tr.data)
 
-            ax.set_title(f"{net}.{sta}")
-            ax.set_ylabel("Counts")
-            ax.legend(loc="upper right", fontsize=8)
-            ax.xaxis_date()
+            ax_time.set_title(f"{target['net']}.{target['sta']}.{target['cha']}")
+            ax_time.set_ylabel("Amplitude")
+            ax_time.set_xlabel("Time (s)")
 
-        ax2.set_xlabel("Time (UTC)")
-        fig.autofmt_xdate()
+            # Frequency
+            fs = tr.stats.sampling_rate
 
-        fig.canvas.draw()
-        fig.canvas.flush_events()
-        plt.pause(0.001)
+            freqs, psd = welch(
+                tr.data,
+                fs=fs,
+                nperseg=min(1024, len(tr.data))
+            )
+
+            ax_freq.semilogy(freqs, psd)
+
+            ax_freq.set_title(f"PSD — {target['net']}.{target['sta']}")
+            ax_freq.set_xlabel("Frequency (Hz)")
+            ax_freq.set_ylabel("PSD (dB/Hz)")
+            # ax_freq.set_xlim(0, 15)
+            # ax_freq.set_xlim(0, fs / 2.0)
+
+        plt.tight_layout()
+        plt.pause(0.01)
 
 
-client = MultiStationClient(SERVER, autoconnect=False)
+# Connect to RingServer
+
+client = MyClient(
+    SERVER,
+    autoconnect=False
+)
+
 client.conn.timeout = 10
-client.connect()
-
-for (net, sta), channels in TARGETS.items():
-    for cha in channels:
-        client.select_stream(net, sta, cha)
-
 try:
+    client.connect()
+
+    # Subscribe using network & station targets
+    for target in stations:
+        client.select_stream(target["net"], target["sta"], target["cha"])
+
+    print("Receiving live data... Press Ctrl+C to stop.")
     client.run()
+
 except KeyboardInterrupt:
-    print("\nDisconnected by user.")
+    print("\nStream stopped by user.")
+except Exception as e:
+    print(f"\nConnection Error: {e}")
+finally:
     client.close()
+    plt.close("all")
