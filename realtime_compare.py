@@ -45,7 +45,7 @@ class MyClient(EasySeedLinkClient):
             st.detrend("demean")
             st.detrend("linear")
             # Filter narrower band (0.5 - 2.0 Hz) to eliminate uncorrelated high-frequency noise
-            st.filter("bandpass", freqmin=0.5, freqmax=2.0, zerophase=False)
+            st.filter("bandpass", freqmin=0.5, freqmax=5.0, zerophase=False)
 
         except Exception:
             return
