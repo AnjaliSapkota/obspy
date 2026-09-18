@@ -14,9 +14,9 @@ stations = [
     {"net": "NP", "sta": "EQM11", "cha": "HNZ"}
 ]
 
-# plt.ion()
-# plt.rcParams['keymap.quit'] = []
-# fig, axes = plt.subplots(2, 2, figsize=(12, 7))
+plt.ion()
+plt.rcParams['keymap.quit'] = []
+fig, axes = plt.subplots(2, 2, figsize=(12, 7))
 
 # normalized cross correlation
 
@@ -196,47 +196,47 @@ class MyClient(EasySeedLinkClient):
             return
         self.last_plot_time = current_time
 
-        # # Render subplots
-        # for row, target in enumerate(stations):
-        #     ax_time, ax_freq = axes[row][0], axes[row][1]
-        #     ax_time.clear()
-        #     ax_freq.clear()
+        # Render subplots
+        for row, target in enumerate(stations):
+            ax_time, ax_freq = axes[row][0], axes[row][1]
+            ax_time.clear()
+            ax_freq.clear()
 
-        #     matched = st.select(
-        #         network=target["net"],
-        #         station=target["sta"],
-        #         channel=target["cha"]
-        #     )
+            matched = st.select(
+                network=target["net"],
+                station=target["sta"],
+                channel=target["cha"]
+            )
 
-        #     if not matched:
-        #         continue
+            if not matched:
+                continue
 
-        #     tr_plot = matched[0]
+            tr_plot = matched[0]
 
-        #     # waveforms
-        #     ax_time.plot(tr_plot.times(), tr_plot.data)
-        #     ax_time.set_title(f"{target['net']}.{target['sta']}.{target['cha']}")
-        #     ax_time.set_ylabel("Amplitude")
-        #     ax_time.set_xlabel("Time (s)")
+            # waveforms
+            ax_time.plot(tr_plot.times(), tr_plot.data)
+            ax_time.set_title(f"{target['net']}.{target['sta']}.{target['cha']}")
+            ax_time.set_ylabel("Amplitude")
+            ax_time.set_xlabel("Time (s)")
 
-        #     # PSD
-        #     if len(tr_plot.data) > 20:
-        #         freqs, psd = welch(tr_plot.data, fs=fs, nperseg=min(1024, len(tr_plot.data)))
-        #         ax_freq.semilogy(freqs, psd)
-        #         ax_freq.set_title(f"PSD — {target['net']}.{target['sta']}")
-        #         ax_freq.set_xlabel("Frequency (Hz)")
-        #         ax_freq.set_ylabel("PSD")
+            # PSD
+            if len(tr_plot.data) > 20:
+                freqs, psd = welch(tr_plot.data, fs=fs, nperseg=min(1024, len(tr_plot.data)))
+                ax_freq.semilogy(freqs, psd)
+                ax_freq.set_title(f"PSD — {target['net']}.{target['sta']}")
+                ax_freq.set_xlabel("Frequency (Hz)")
+                ax_freq.set_ylabel("PSD")
 
-        # # refresh GUI
-        # try:
-        #     plt.tight_layout()
-        #     fig.canvas.draw_idle()
-        #     fig.canvas.flush_events()
-        #     plt.pause(0.001)
-        # except (KeyboardInterrupt, SystemExit):
-        #     raise
-        # except Exception:
-        #     pass
+        # refresh GUI
+        try:
+            plt.tight_layout()
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+            plt.pause(0.001)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            pass
 
 
 client = MyClient(server, autoconnect=False)
