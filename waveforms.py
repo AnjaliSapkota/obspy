@@ -9,8 +9,8 @@ from scipy.signal import spectrogram
 
 client = Client("https://seiscomp.alertnepal.online")
 
-start = UTCDateTime("2026-08-26T02:45:00")
-end   = UTCDateTime("2026-08-26T03:00:00")
+start = UTCDateTime("2026-08-26T02:50:00")
+end   = UTCDateTime("2026-08-26T02:55:00")
 event_time = UTCDateTime("2026-08-26T02:52:00")
 
 
