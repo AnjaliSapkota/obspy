@@ -56,7 +56,7 @@ dist_kkn_evn = station_distance(coord_kkn, coord_evn)
 dist_kkn_eqm10 = station_distance(coord_kkn, coord_eqm10)
 dist_evn_eqm10 = station_distance(coord_evn, coord_eqm10)
 
-print("--- STATION DISTANCES ---")
+print("STATION DISTANCES")
 print(f"KKN - EVN   : {dist_kkn_evn:.2f} km")
 print(f"KKN - EQM10 : {dist_kkn_eqm10:.2f} km")
 print(f"EVN - EQM10 : {dist_evn_eqm10:.2f} km\n")
@@ -140,7 +140,7 @@ lag_kkn_evn = result_kkn_evn["lag"]
 lag_kkn_eqm10 = result_kkn_eqm10["lag"]
 lag_evn_eqm10 = result_evn_eqm10["lag"]
 
-print("--- THREE-STATION TIME-DELAY RESULTS ---")
+print("THREE-STATION TIME-DELAY RESULTS")
 print(f"KKN → EVN     : {lag_kkn_evn:+.3f} s")
 print(f"KKN → EQM10   : {lag_kkn_eqm10:+.3f} s")
 print(f"EVN → EQM10   : {lag_evn_eqm10:+.3f} s")
@@ -148,7 +148,7 @@ print(f"EVN → EQM10   : {lag_evn_eqm10:+.3f} s")
 predicted_kkn_eqm10 = lag_kkn_evn + lag_evn_eqm10
 consistency_error = lag_kkn_eqm10 - predicted_kkn_eqm10
 
-print("\n--- CONSISTENCY CHECK ---")
+print("\nCONSISTENCY CHECK")
 print(f"KKN→EVN + EVN→EQM10 = {predicted_kkn_eqm10:+.3f} s")
 print(f"Measured KKN→EQM10   = {lag_kkn_eqm10:+.3f} s")
 print(f"Consistency error     = {consistency_error:+.3f} s")
