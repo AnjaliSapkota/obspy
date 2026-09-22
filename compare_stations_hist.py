@@ -2,245 +2,266 @@ import numpy as np
 import matplotlib.pyplot as plt
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-from scipy.signal import (
-    hilbert, windows, correlate, correlation_lags, 
-    welch, spectrogram, coherence, csd
-)
+from scipy.signal import hilbert, windows, correlate, correlation_lags
 from obspy.geodetics import gps2dist_azimuth
 
-#  Fetch Waveforms
+# 1. Fetch Waveforms
 client = Client("https://seiscomp.alertnepal.online")
 
-start = UTCDateTime("2026-08-26T02:50:00")
-end   = UTCDateTime("2026-08-26T02:55:00")
+start = UTCDateTime("2026-08-26T02:30:00")
+end   = UTCDateTime("2026-08-26T03:00:00")
 
-st_a = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
-st_b = client.get_waveforms(network="IO", station="EVN", location="*", channel="BHZ", starttime=start, endtime=end)
-
-print("KKN traces returned:", len(st_a))
-print("EVN traces returned:", len(st_b))
-
-# Merge first in case there are gaps or multiple pieces
-st_a.merge(method=1, fill_value="interpolate")
-st_b.merge(method=1, fill_value="interpolate")
-
-print("KKN traces after merge:", len(st_a))
-print("EVN traces after merge:", len(st_b))
-
-tr_a = st_a[0].copy()
-tr_b = st_b[0].copy()
-
-print("KKN sampling rate:", tr_a.stats.sampling_rate)
-print("EVN sampling rate:", tr_b.stats.sampling_rate)
-
-# Station distance
+target_fs = 20.0
+freqmin = 1.0
+freqmax = 8.0
 max_shift_seconds = 30.0
 
-try:
-    inv_a = client.get_stations(
-        network="NK",
-        station="KKN",
-        level="channel"
-    )
+st_kkn = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
+st_evn = client.get_waveforms(network="IO", station="EVN", location="*", channel="BHZ", starttime=start, endtime=end)
+st_eqm10 = client.get_waveforms(network="NP", station="EQM10", location="*", channel="HNZ", starttime=start, endtime=end)
 
-    inv_b = client.get_stations(
-        network="IO",
-        station="EVN",
-        level="channel"
-    )
+# Merge gaps or segments
+st_kkn.merge(method=1, fill_value="interpolate")
+st_evn.merge(method=1, fill_value="interpolate")
+st_eqm10.merge(method=1, fill_value="interpolate")
 
-    coord_a = inv_a.get_coordinates(tr_a.id)
-    coord_b = inv_b.get_coordinates(tr_b.id)
+tr_kkn = st_kkn[0]
+tr_evn = st_evn[0]
+tr_eqm10 = st_eqm10[0]
 
+# Station metadata & coordinates
+inv_kkn = client.get_stations(network="NK", station="KKN", level="station")
+inv_evn = client.get_stations(network="IO", station="EVN", level="station")
+inv_eqm10 = client.get_stations(network="NP", station="EQM10", level="station")
+
+def extract_station_coords(inv):
+    sta = inv[0][0]
+    return {"latitude": sta.latitude, "longitude": sta.longitude}
+
+coord_kkn = extract_station_coords(inv_kkn)
+coord_evn = extract_station_coords(inv_evn)
+coord_eqm10 = extract_station_coords(inv_eqm10)
+
+# Fixed station_distance function
+def station_distance(coord1, coord2):
     dist_m, az, baz = gps2dist_azimuth(
-        coord_a["latitude"],
-        coord_a["longitude"],
-        coord_b["latitude"],
-        coord_b["longitude"]
+        coord1["latitude"],
+        coord1["longitude"],
+        coord2["latitude"],
+        coord2["longitude"]  # Corrected bracket syntax
     )
+    return dist_m / 1000.0
 
-    dist_km = dist_m / 1000.0
+dist_kkn_evn = station_distance(coord_kkn, coord_evn)
+dist_kkn_eqm10 = station_distance(coord_kkn, coord_eqm10)
+dist_evn_eqm10 = station_distance(coord_evn, coord_eqm10)
 
-    print("\nStation distance:")
-    print(f"KKN → EVN: {dist_km:.2f} km")
+print("--- STATION DISTANCES ---")
+print(f"KKN - EVN   : {dist_kkn_evn:.2f} km")
+print(f"KKN - EQM10 : {dist_kkn_eqm10:.2f} km")
+print(f"EVN - EQM10 : {dist_evn_eqm10:.2f} km\n")
 
-    # Approximate velocity range
-    lag_fast = dist_km / 8.0
-    lag_slow = dist_km / 2.0
+# Preprocessing
+def preprocess(tr):
+    tr_proc = tr.copy()
+    tr_proc.detrend("linear")
+    tr_proc.detrend("demean")
+    tr_proc.taper(max_percentage=0.05, type="cosine")
+    tr_proc.interpolate(sampling_rate=target_fs, method="weighted_average_slopes")
+    tr_proc.filter("bandpass", freqmin=freqmin, freqmax=freqmax, zerophase=True)
+    return tr_proc
 
-    print(
-        f"Approximate travel-time range using 2–8 km/s: "
-        f"{lag_fast:.1f}–{lag_slow:.1f} s"
-    )
+tr_kkn = preprocess(tr_kkn)
+tr_evn = preprocess(tr_evn)
+tr_eqm10 = preprocess(tr_eqm10)
 
-    print(
-        f"Correlation search window: ±{max_shift_seconds:.1f} s"
-    )
+# Align to common time window
+common_start = max(tr_kkn.stats.starttime, tr_evn.stats.starttime, tr_eqm10.stats.starttime)
+common_end = min(tr_kkn.stats.endtime, tr_evn.stats.endtime, tr_eqm10.stats.endtime)
 
-except Exception as e:
-    print("Could not calculate station distance:", e)
+tr_kkn.trim(common_start, common_end)
+tr_evn.trim(common_start, common_end)
+tr_eqm10.trim(common_start, common_end)
 
-# 2. Basic Preprocessing & Filtering (1 - 8 Hz)
-freqmin, freqmax = 1.0, 8.0
-tr_a.detrend("linear").detrend("demean").taper(max_percentage=0.05, type="cosine")
-tr_b.detrend("linear").detrend("demean").taper(max_percentage=0.05, type="cosine")
+# Delay Calculation Function
+def calculate_delay(tr1, tr2, name1, name2):
+    raw1 = tr1.data.astype(float)
+    raw2 = tr2.data.astype(float)
 
-tr_a.filter("bandpass", freqmin=freqmin, freqmax=freqmax, zerophase=True)
-tr_b.filter("bandpass", freqmin=freqmin, freqmax=freqmax, zerophase=True)
+    min_len = min(len(raw1), len(raw2))
+    raw1 = raw1[:min_len]
+    raw2 = raw2[:min_len]
 
-# 3. Interpolation & Time Alignment
-target_fs = 20.0
-tr_a.interpolate(sampling_rate=target_fs, method="weighted_average_slopes")
-tr_b.interpolate(sampling_rate=target_fs, method="weighted_average_slopes")
+    fs = tr1.stats.sampling_rate
 
-common_start = max(tr_a.stats.starttime, tr_b.stats.starttime)
-common_end   = min(tr_a.stats.endtime, tr_b.stats.endtime)
+    # Envelopes via Hilbert Transform
+    env1 = np.abs(hilbert(raw1))
+    env2 = np.abs(hilbert(raw2))
 
-tr_a = tr_a.trim(common_start, common_end)
-tr_b = tr_b.trim(common_start, common_end)
+    crop = int(0.05 * len(env1))
+    env1 = env1[crop:-crop] - np.mean(env1[crop:-crop])
+    env2 = env2[crop:-crop] - np.mean(env2[crop:-crop])
 
-raw_a = tr_a.data.astype(float)
-raw_b = tr_b.data.astype(float)
+    taper = windows.tukey(len(env1), alpha=0.05)
+    a = env1 * taper
+    b = env2 * taper
 
-# Ensure matching lengths
-min_len = min(len(raw_a), len(raw_b))
-raw_a = raw_a[:min_len]
-raw_b = raw_b[:min_len]
+    corr_full = correlate(a, b, mode="full")
+    lags_full = correlation_lags(len(a), len(b), mode="full")
+    norm_factor = np.sqrt(np.sum(a**2) * np.sum(b**2))
+    normalized_cc_full = corr_full / norm_factor
 
-fs = tr_a.stats.sampling_rate
+    max_shift_samples = int(round(max_shift_seconds * fs))
+    mask = (lags_full >= -max_shift_samples) & (lags_full <= max_shift_samples)
 
-# 4. Hilbert Envelope & Edge Artifact Removal
-env_a = np.abs(hilbert(raw_a))
-env_b = np.abs(hilbert(raw_b))
+    lags_samples = lags_full[mask]
+    normalized_cc = normalized_cc_full[mask]
+    lags_seconds = lags_samples / fs
 
-crop = int(0.05 * len(env_a))
-env_a = env_a[crop:-crop]
-env_b = env_b[crop:-crop]
-raw_a = raw_a[crop:-crop]
-raw_b = raw_b[crop:-crop]
+    peak_index = np.argmax(normalized_cc)
+    best_lag_seconds = lags_seconds[peak_index]
+    max_corr = normalized_cc[peak_index]
 
-# 5. Envelope Cross-Correlation
-env_a_zero = env_a - np.mean(env_a)
-env_b_zero = env_b - np.mean(env_b)
+    return {
+        "name1": name1,
+        "name2": name2,
+        "lag": best_lag_seconds,
+        "correlation": max_corr,
+        "lags": lags_seconds,
+        "cc": normalized_cc
+    }
 
-n = len(env_a_zero)
-taper = windows.tukey(n, alpha=0.05)
-a = env_a_zero * taper
-b = env_b_zero * taper
+# Compute delays
+result_kkn_evn = calculate_delay(tr_kkn, tr_evn, "KKN", "EVN")
+result_kkn_eqm10 = calculate_delay(tr_kkn, tr_eqm10, "KKN", "EQM10")
+result_evn_eqm10 = calculate_delay(tr_evn, tr_eqm10, "EVN", "EQM10")
 
-corr_full = correlate(a, b, mode="full")
-lags_full = correlation_lags(len(a), len(b), mode="full")
-norm_factor = np.sqrt(np.sum(a**2) * np.sum(b**2))
-normalized_cc_full = corr_full / norm_factor
+lag_kkn_evn = result_kkn_evn["lag"]
+lag_kkn_eqm10 = result_kkn_eqm10["lag"]
+lag_evn_eqm10 = result_evn_eqm10["lag"]
 
-max_shift_samples = int(round(max_shift_seconds * fs))
+print("--- THREE-STATION TIME-DELAY RESULTS ---")
+print(f"KKN → EVN     : {lag_kkn_evn:+.3f} s")
+print(f"KKN → EQM10   : {lag_kkn_eqm10:+.3f} s")
+print(f"EVN → EQM10   : {lag_evn_eqm10:+.3f} s")
 
-mask = (lags_full >= -max_shift_samples) & (lags_full <= max_shift_samples)
-lags_samples = lags_full[mask]
-normalized_cc = normalized_cc_full[mask]
-lags_seconds = lags_samples / fs
+predicted_kkn_eqm10 = lag_kkn_evn + lag_evn_eqm10
+consistency_error = lag_kkn_eqm10 - predicted_kkn_eqm10
 
-peak_index = np.argmax(normalized_cc)
-best_lag_samples = lags_samples[peak_index]
-best_lag_seconds = lags_seconds[peak_index]
-max_corr = normalized_cc[peak_index]
+print("\n--- CONSISTENCY CHECK ---")
+print(f"KKN→EVN + EVN→EQM10 = {predicted_kkn_eqm10:+.3f} s")
+print(f"Measured KKN→EQM10   = {lag_kkn_eqm10:+.3f} s")
+print(f"Consistency error     = {consistency_error:+.3f} s")
 
-print(f"Max search shift: {max_shift_seconds} s")
-print(f"Best lag in samples: {best_lag_samples}")
-print(f"Best lag in seconds: {best_lag_seconds:.3f} s")
-print(f"Normalized Correlation Coefficient: {max_corr:.4f}")
+# # Plotting
+# fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+# results = [result_kkn_evn, result_kkn_eqm10, result_evn_eqm10]
 
-# 6. Spectral & Phase Analysis
-freq_a, psd_a = welch(raw_a, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
-freq_b, psd_b = welch(raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
+# for ax, res in zip(axes, results):
+#     ax.plot(res["lags"], res["cc"], color='tab:blue')
+#     ax.axvline(res["lag"], color='tab:red', linestyle="--", 
+#                label=f"Lag = {res['lag']:+.3f} s, CC = {res['correlation']:.3f}")
+#     ax.axvline(0, color='black', linestyle=":")
+#     ax.set_ylabel("Correlation")
+#     ax.set_title(f"{res['name1']} vs {res['name2']}")
+#     ax.legend(loc="upper right")
+#     ax.grid(True, alpha=0.3)
 
-f_a, t_a, Sxx_a = spectrogram(raw_a, fs=fs, window="hann", nperseg=int(10 * fs), noverlap=int(8 * fs), scaling="density")
-f_b, t_b, Sxx_b = spectrogram(raw_b, fs=fs, window="hann", nperseg=int(10 * fs), noverlap=int(8 * fs), scaling="density")
+# axes[-1].set_xlabel("Lag (seconds)")
+# plt.tight_layout()
+# plt.show()
 
-f_coh, Cxy = coherence(raw_a, raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
+# # 6. Spectral & Phase Analysis
+# freq_a, psd_a = welch(raw_a, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
+# freq_b, psd_b = welch(raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
 
-# Cross-Spectral Density (CSD) & Phase Lag calculation
-f_csd, Pxy = csd(raw_a, raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
+# f_a, t_a, Sxx_a = spectrogram(raw_a, fs=fs, window="hann", nperseg=int(10 * fs), noverlap=int(8 * fs), scaling="density")
+# f_b, t_b, Sxx_b = spectrogram(raw_b, fs=fs, window="hann", nperseg=int(10 * fs), noverlap=int(8 * fs), scaling="density")
 
-phase_lag_rad = np.angle(Pxy)
-phase_lag_deg = np.degrees(phase_lag_rad)
+# f_coh, Cxy = coherence(raw_a, raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
 
-# Time delay per frequency: tau(f) = phase_rad / (2 * pi * f)
-time_delay_f = np.zeros_like(phase_lag_rad)
-time_delay_f[1:] = phase_lag_rad[1:] / (2 * np.pi * f_csd[1:])
+# # Cross-Spectral Density (CSD) & Phase Lag calculation
+# f_csd, Pxy = csd(raw_a, raw_b, fs=fs, window="hann", nperseg=int(20 * fs), noverlap=int(10 * fs))
 
-# Mask phase lag where coherence is low (< 0.3)
-masked_phase_deg = np.where(Cxy >= 0.3, phase_lag_deg, np.nan)
+# phase_lag_rad = np.angle(Pxy)
+# phase_lag_deg = np.degrees(phase_lag_rad)
 
-# 7. Visualization
-fig, axes = plt.subplots(5, 1, figsize=(12, 16))
+# # Time delay per frequency: tau(f) = phase_rad / (2 * pi * f)
+# time_delay_f = np.zeros_like(phase_lag_rad)
+# time_delay_f[1:] = phase_lag_rad[1:] / (2 * np.pi * f_csd[1:])
 
-# Time Domain Envelopes
-t = np.arange(len(env_a)) / fs
-axes[0].plot(t, env_a, label="KKN Envelope", color="tab:blue")
-axes[0].plot(t, env_b, label="EVN Envelope", color="tab:orange")
-axes[0].set_ylabel("Amplitude")
-axes[0].set_title("Time Domain — Hilbert Envelopes")
-axes[0].legend()
-axes[0].grid(True)
+# # Mask phase lag where coherence is low (< 0.3)
+# masked_phase_deg = np.where(Cxy >= 0.3, phase_lag_deg, np.nan)
 
-# Cross-Correlation Function
-axes[1].plot(lags_seconds, normalized_cc, color="black")
-axes[1].axvline(best_lag_seconds, color="red", linestyle="--", label=f"Peak Lag: {best_lag_seconds:.3f} s (CC: {max_corr:.2f})")
-axes[1].set_xlabel("Time Lag (s)")
-axes[1].set_ylabel("Normalized CC")
-axes[1].set_title("Envelope Cross-Correlation")
-axes[1].legend()
-axes[1].grid(True)
+# # 7. Visualization
+# fig, axes = plt.subplots(5, 1, figsize=(12, 16))
 
-# Power Spectral Density
-axes[2].semilogy(freq_a, psd_a, label="KKN")
-axes[2].semilogy(freq_b, psd_b, label="EVN")
-axes[2].set_xlim(0, 10)
-axes[2].set_xlabel("Frequency (Hz)")
-axes[2].set_ylabel("PSD")
-axes[2].set_title("Frequency Domain — Power Spectral Density")
-axes[2].legend()
-axes[2].grid(True)
+# # Time Domain Envelopes
+# t = np.arange(len(env_a)) / fs
+# axes[0].plot(t, env_a, label="KKN Envelope", color="tab:blue")
+# axes[0].plot(t, env_b, label="EVN Envelope", color="tab:orange")
+# axes[0].set_ylabel("Amplitude")
+# axes[0].set_title("Time Domain — Hilbert Envelopes")
+# axes[0].legend()
+# axes[0].grid(True)
 
-# Spectrograms
-mesh1 = axes[3].pcolormesh(t_a, f_a, 10 * np.log10(Sxx_a + 1e-20), shading="auto", cmap="viridis")
-axes[3].set_ylim(0, 10)
-axes[3].set_ylabel("Frequency (Hz)")
-axes[3].set_title("KKN Spectrogram (dB)")
-fig.colorbar(mesh1, ax=axes[3], label="dB")
+# # Cross-Correlation Function
+# axes[1].plot(lags_seconds, normalized_cc, color="black")
+# axes[1].axvline(best_lag_seconds, color="red", linestyle="--", label=f"Peak Lag: {best_lag_seconds:.3f} s (CC: {max_corr:.2f})")
+# axes[1].set_xlabel("Time Lag (s)")
+# axes[1].set_ylabel("Normalized CC")
+# axes[1].set_title("Envelope Cross-Correlation")
+# axes[1].legend()
+# axes[1].grid(True)
 
-mesh2 = axes[4].pcolormesh(t_b, f_b, 10 * np.log10(Sxx_b + 1e-20), shading="auto", cmap="viridis")
-axes[4].set_ylim(0, 10)
-axes[4].set_xlabel("Time (s)")
-axes[4].set_ylabel("Frequency (Hz)")
-axes[4].set_title("EVN Spectrogram (dB)")
-fig.colorbar(mesh2, ax=axes[4], label="dB")
+# # Power Spectral Density
+# axes[2].semilogy(freq_a, psd_a, label="KKN")
+# axes[2].semilogy(freq_b, psd_b, label="EVN")
+# axes[2].set_xlim(0, 10)
+# axes[2].set_xlabel("Frequency (Hz)")
+# axes[2].set_ylabel("PSD")
+# axes[2].set_title("Frequency Domain — Power Spectral Density")
+# axes[2].legend()
+# axes[2].grid(True)
 
-plt.tight_layout()
-plt.show()
+# # Spectrograms
+# mesh1 = axes[3].pcolormesh(t_a, f_a, 10 * np.log10(Sxx_a + 1e-20), shading="auto", cmap="viridis")
+# axes[3].set_ylim(0, 10)
+# axes[3].set_ylabel("Frequency (Hz)")
+# axes[3].set_title("KKN Spectrogram (dB)")
+# fig.colorbar(mesh1, ax=axes[3], label="dB")
 
-# Coherence & Phase Lag Plot
-fig, (ax_coh, ax_phase) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+# mesh2 = axes[4].pcolormesh(t_b, f_b, 10 * np.log10(Sxx_b + 1e-20), shading="auto", cmap="viridis")
+# axes[4].set_ylim(0, 10)
+# axes[4].set_xlabel("Time (s)")
+# axes[4].set_ylabel("Frequency (Hz)")
+# axes[4].set_title("EVN Spectrogram (dB)")
+# fig.colorbar(mesh2, ax=axes[4], label="dB")
 
-# Coherence Subplot
-ax_coh.plot(f_coh, Cxy, color="purple")
-ax_coh.set_ylabel("Coherence")
-ax_coh.set_title("Frequency-Domain Coherence & Phase Lag — KKN vs EVN")
-ax_coh.set_ylim(0, 1)
-ax_coh.set_xlim(0, 10)
-ax_coh.grid(True)
+# plt.tight_layout()
+# plt.show()
 
-# Phase Lag Subplot
-ax_phase.plot(f_csd, phase_lag_deg, color="gray", alpha=0.4, linestyle="--", label="Raw Phase")
-ax_phase.plot(f_csd, masked_phase_deg, color="crimson", linewidth=2, label="Phase (Coherence ≥ 0.3)")
-ax_phase.axhline(0, color="black", linestyle=":", alpha=0.7)
-ax_phase.set_xlabel("Frequency (Hz)")
-ax_phase.set_ylabel("Phase Lag (Degrees)")
-ax_phase.set_ylim(-180, 180)
-ax_phase.set_xlim(0, 10)
-ax_phase.legend()
-ax_phase.grid(True)
+# # Coherence & Phase Lag Plot
+# fig, (ax_coh, ax_phase) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
 
-plt.tight_layout()
-plt.show()
+# # Coherence Subplot
+# ax_coh.plot(f_coh, Cxy, color="purple")
+# ax_coh.set_ylabel("Coherence")
+# ax_coh.set_title("Frequency-Domain Coherence & Phase Lag — KKN vs EVN")
+# ax_coh.set_ylim(0, 1)
+# ax_coh.set_xlim(0, 10)
+# ax_coh.grid(True)
+
+# # Phase Lag Subplot
+# ax_phase.plot(f_csd, phase_lag_deg, color="gray", alpha=0.4, linestyle="--", label="Raw Phase")
+# ax_phase.plot(f_csd, masked_phase_deg, color="crimson", linewidth=2, label="Phase (Coherence ≥ 0.3)")
+# ax_phase.axhline(0, color="black", linestyle=":", alpha=0.7)
+# ax_phase.set_xlabel("Frequency (Hz)")
+# ax_phase.set_ylabel("Phase Lag (Degrees)")
+# ax_phase.set_ylim(-180, 180)
+# ax_phase.set_xlim(0, 10)
+# ax_phase.legend()
+# ax_phase.grid(True)
+
+# plt.tight_layout()
+# plt.show()
