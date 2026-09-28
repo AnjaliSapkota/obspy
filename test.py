@@ -113,45 +113,109 @@ tr_knset.trim(starttime=common_start,endtime=common_end)
 #     "Hz"
 # )
 
-# Cross-correlation between two stations
-signal_kkn = tr_kkn.data.astype(float)
-signal_evn = tr_evn.data.astype(float)
+# # Cross-correlation between two stations
+# signal_kkn = tr_kkn.data.astype(float)
+# signal_evn = tr_evn.data.astype(float)
 
 # # Remove mean
 # signal_kkn = signal_kkn - np.mean(signal_kkn)
 # signal_evn = signal_evn - np.mean(signal_evn)
 
-# Normalize
-signal_kkn = signal_kkn / np.linalg.norm(signal_kkn)
-signal_evn = signal_evn / np.linalg.norm(signal_evn)
+# # Normalize
+# signal_kkn = signal_kkn / np.linalg.norm(signal_kkn)
+# signal_evn = signal_evn / np.linalg.norm(signal_evn)
 
-# Calculate cross-correlation
-correlation = correlate(
-    signal_evn,
-    signal_kkn,
-    mode="full"
+# # Calculate cross-correlation
+# correlation = correlate(
+#     signal_evn,
+#     signal_kkn,
+#     mode="full"
+# )
+
+# # Calculate corresponding lags
+# lags = correlation_lags(
+#     len(signal_evn),
+#     len(signal_kkn),
+#     mode="full"
+# )
+
+# # Find maximum correlation
+# max_index = np.argmax(correlation)
+
+# best_lag_samples = lags[max_index]
+
+# # Convert samples to seconds
+# best_lag_seconds = best_lag_samples / target_fs
+
+# print("\nCross-correlation result:")
+# print("Maximum correlation:", correlation[max_index])
+# print("Lag:", best_lag_samples, "samples")
+# print("Time difference:", best_lag_seconds, "seconds")
+
+def calculate_lag(trace_a, trace_b, sampling_rate):
+
+    signal_a = trace_a.data.astype(float)
+    signal_b = trace_b.data.astype(float)
+
+    # Normalize
+    signal_a = signal_a / np.linalg.norm(signal_a)
+    signal_b = signal_b / np.linalg.norm(signal_b)
+
+    # Cross-correlation
+    correlation = correlate(
+        signal_b,
+        signal_a,
+        mode="full"
+    )
+
+    # Corresponding lags
+    lags = correlation_lags(
+        len(signal_b),
+        len(signal_a),
+        mode="full"
+    )
+
+    # Find maximum correlation
+    max_index = np.argmax(correlation)
+
+    lag_samples = lags[max_index]
+    lag_seconds = lag_samples / sampling_rate
+
+    max_correlation = correlation[max_index]
+
+    return lag_seconds, max_correlation
+
+
+# Calculate pairwise time differences
+
+lag_kkn_evn, cc_kkn_evn = calculate_lag(
+    tr_kkn,
+    tr_evn,
+    target_fs
 )
 
-# Calculate corresponding lags
-lags = correlation_lags(
-    len(signal_evn),
-    len(signal_kkn),
-    mode="full"
+lag_kkn_knset, cc_kkn_knset = calculate_lag(
+    tr_kkn,
+    tr_knset,
+    target_fs
 )
 
-# Find maximum correlation
-max_index = np.argmax(correlation)
+lag_evn_knset, cc_evn_knset = calculate_lag(
+    tr_evn,
+    tr_knset,
+    target_fs
+)
 
-best_lag_samples = lags[max_index]
 
-# Convert samples to seconds
-best_lag_seconds = best_lag_samples / target_fs
+# Print results
 
-print("\nCross-correlation result:")
-print("Maximum correlation:", correlation[max_index])
-print("Lag:", best_lag_samples, "samples")
-print("Time difference:", best_lag_seconds, "seconds")
+print("\nPairwise cross-correlation results")
 
+print(f"KKN - EVN: " f"lag = {lag_kkn_evn:.3f} s, " f"CC = {cc_kkn_evn:.3f}")
+
+print(f"KKN → KNSET: "f"lag = {lag_kkn_knset:.3f} s, "f"CC = {cc_kkn_knset:.3f}")
+
+print(f"EVN → KNSET: "f"lag = {lag_evn_knset:.3f} s, "f"CC = {cc_evn_knset:.3f}")
 # # Plot the three preprocessed signals
 # plt.figure(figsize=(12, 8))
 
