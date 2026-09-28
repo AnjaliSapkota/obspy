@@ -8,12 +8,12 @@ from scipy.signal import correlate, correlation_lags
 # FDSN client
 client = Client("EARTHSCOPE")
 
-start = UTCDateTime("2026-08-26T02:30:00")
-end   = UTCDateTime("2026-08-26T03:00:00")
+start = UTCDateTime("2026-08-26T02:52:00")
+end   = UTCDateTime("2026-08-26T02:55:00")
 # Processing settings
 target_fs = 20.0
 freqmin = 1.0
-freqmax = 8.0
+freqmax = 6.0
 
 # Stations
 
@@ -33,6 +33,12 @@ def preprocess(stream):
     stream.detrend("linear")
     stream.detrend("demean")
     stream.taper(max_percentage=0.05,type="cosine")
+
+    # If using HNZ (acceleration), integrate to velocity to match BHZ channels
+    for tr in stream:
+        if tr.stats.channel.startswith("HN"):
+            tr.integrate()
+
     stream.filter("bandpass", freqmin=freqmin, freqmax=freqmax, zerophase=True)
 
     # Resample all stations to the same sampling rate
@@ -87,70 +93,14 @@ tr_kkn.trim(starttime=common_start,endtime=common_end)
 tr_evn.trim(starttime=common_start,endtime=common_end)
 tr_knset.trim(starttime=common_start,endtime=common_end)
 
-# # Print final information
-# print("\nAfter preprocessing and trimming:")
+ # Focus on a short window around the primary phase arrival (e.g., t = 50s to 75s)
+win_start = common_start + 50
+win_end = common_start + 75
 
-# print( "KKN:",
-#     len(tr_kkn.data),
-#     "samples,",
-#     tr_kkn.stats.sampling_rate,
-#     "Hz"
-# )
+tr_kkn_win = tr_kkn.copy().trim(win_start, win_end)
+tr_evn_win = tr_evn.copy().trim(win_start, win_end)
+tr_knset_win = tr_knset.copy().trim(win_start, win_end)
 
-# print(
-#     "EVN:",
-#     len(tr_evn.data),
-#     "samples,",
-#     tr_evn.stats.sampling_rate,
-#     "Hz"
-# )
-
-# print(
-#     "KNSET:",
-#     len(tr_knset.data),
-#     "samples,",
-#     tr_knset.stats.sampling_rate,
-#     "Hz"
-# )
-
-# # Cross-correlation between two stations
-# signal_kkn = tr_kkn.data.astype(float)
-# signal_evn = tr_evn.data.astype(float)
-
-# # Remove mean
-# signal_kkn = signal_kkn - np.mean(signal_kkn)
-# signal_evn = signal_evn - np.mean(signal_evn)
-
-# # Normalize
-# signal_kkn = signal_kkn / np.linalg.norm(signal_kkn)
-# signal_evn = signal_evn / np.linalg.norm(signal_evn)
-
-# # Calculate cross-correlation
-# correlation = correlate(
-#     signal_evn,
-#     signal_kkn,
-#     mode="full"
-# )
-
-# # Calculate corresponding lags
-# lags = correlation_lags(
-#     len(signal_evn),
-#     len(signal_kkn),
-#     mode="full"
-# )
-
-# # Find maximum correlation
-# max_index = np.argmax(correlation)
-
-# best_lag_samples = lags[max_index]
-
-# # Convert samples to seconds
-# best_lag_seconds = best_lag_samples / target_fs
-
-# print("\nCross-correlation result:")
-# print("Maximum correlation:", correlation[max_index])
-# print("Lag:", best_lag_samples, "samples")
-# print("Time difference:", best_lag_seconds, "seconds")
 
 def calculate_lag(trace_a, trace_b, sampling_rate):
 
@@ -188,36 +138,19 @@ def calculate_lag(trace_a, trace_b, sampling_rate):
 
 # Calculate pairwise time differences
 
-lag_kkn_evn, cc_kkn_evn = calculate_lag(
-    tr_kkn,
-    tr_evn,
-    target_fs
-)
+lag_kkn_evn, cc_kkn_evn = calculate_lag(tr_kkn_win, tr_evn_win, target_fs)
+lag_kkn_knset, cc_kkn_knset = calculate_lag(tr_kkn_win, tr_knset_win, target_fs)
+lag_evn_knset, cc_evn_knset = calculate_lag(tr_evn_win, tr_knset_win, target_fs)
 
-lag_kkn_knset, cc_kkn_knset = calculate_lag(
-    tr_kkn,
-    tr_knset,
-    target_fs
-)
+closure_error = lag_kkn_knset - (lag_kkn_evn + lag_evn_knset)
 
-lag_evn_knset, cc_evn_knset = calculate_lag(
-    tr_evn,
-    tr_knset,
-    target_fs
-)
+print(f"KKN - EVN:   lag = {lag_kkn_evn:.3f} s, CC = {cc_kkn_evn:.3f}")
+print(f"KKN → KNSET: lag = {lag_kkn_knset:.3f} s, CC = {cc_kkn_knset:.3f}")
+print(f"EVN → KNSET: lag = {lag_evn_knset:.3f} s, CC = {cc_evn_knset:.3f}")
+print(f"\nTDOA closure error: {closure_error:+.3f} s")
 
-
-# Print results
-
-print("\nPairwise cross-correlation results")
-
-print(f"KKN - EVN: " f"lag = {lag_kkn_evn:.3f} s, " f"CC = {cc_kkn_evn:.3f}")
-
-print(f"KKN → KNSET: "f"lag = {lag_kkn_knset:.3f} s, "f"CC = {cc_kkn_knset:.3f}")
-
-print(f"EVN → KNSET: "f"lag = {lag_evn_knset:.3f} s, "f"CC = {cc_evn_knset:.3f}")
 # # Plot the three preprocessed signals
-# plt.figure(figsize=(12, 8))
+# plt.figure(figsize=(12, 8)) 
 
 # plt.subplot(3, 1, 1)
 # plt.plot(tr_kkn.times(), tr_kkn.data)
