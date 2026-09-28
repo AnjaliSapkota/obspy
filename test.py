@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-
+from scipy.signal import correlate, correlation_lags
 
 # FDSN client
 client = Client("EARTHSCOPE")
@@ -44,6 +44,9 @@ def preprocess(stream):
 
     return stream
 
+st_kkn = preprocess(st_kkn)
+st_evn = preprocess(st_evn)
+st_knset = preprocess(st_knset)
 
 def get_trace(stream):
     if len(stream) == 0:
@@ -110,6 +113,44 @@ tr_knset.trim(starttime=common_start,endtime=common_end)
 #     "Hz"
 # )
 
+# Cross-correlation between two stations
+signal_kkn = tr_kkn.data.astype(float)
+signal_evn = tr_evn.data.astype(float)
+
+# # Remove mean
+# signal_kkn = signal_kkn - np.mean(signal_kkn)
+# signal_evn = signal_evn - np.mean(signal_evn)
+
+# Normalize
+signal_kkn = signal_kkn / np.linalg.norm(signal_kkn)
+signal_evn = signal_evn / np.linalg.norm(signal_evn)
+
+# Calculate cross-correlation
+correlation = correlate(
+    signal_evn,
+    signal_kkn,
+    mode="full"
+)
+
+# Calculate corresponding lags
+lags = correlation_lags(
+    len(signal_evn),
+    len(signal_kkn),
+    mode="full"
+)
+
+# Find maximum correlation
+max_index = np.argmax(correlation)
+
+best_lag_samples = lags[max_index]
+
+# Convert samples to seconds
+best_lag_seconds = best_lag_samples / target_fs
+
+print("\nCross-correlation result:")
+print("Maximum correlation:", correlation[max_index])
+print("Lag:", best_lag_samples, "samples")
+print("Time difference:", best_lag_seconds, "seconds")
 
 # # Plot the three preprocessed signals
 # plt.figure(figsize=(12, 8))
