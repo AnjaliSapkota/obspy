@@ -9,8 +9,8 @@ SERVER = "ring.wscada.net:18000"
 WINDOW = 10
 
 stations = [
-    {"net": "NP", "sta": "EQM11", "cha": "HNZ"},
-    {"net": "NP", "sta": "EQM13", "cha": "HNZ"}
+    {"net": "NP", "sta": "EQM06", "cha": "EHZ"},
+    {"net": "NP", "sta": "EQM10", "cha": "EHZ"}
 ]
 
 plt.ion()
@@ -201,14 +201,14 @@ class MyClient(EasySeedLinkClient):
 
         data11 = st.select(
             network="NP",
-            station="EQM11",
-            channel="HNZ"
+            station="EQM06",
+            channel="EHZ"
         )
 
         data13 = st.select(
             network="NP",
-            station="EQM13",
-            channel="HNZ"
+            station="EQM10",
+            channel="EHZ"
         )
 
         if not data11 or not data13:
@@ -296,7 +296,7 @@ class MyClient(EasySeedLinkClient):
 
             print(
                 f"[{sys_time} Sys | {utc_time} UTC] "
-                f"EQM11 vs EQM13 | "
+                f"EQM06 vs EQM10 | "
                 f"Window: {window_used:.2f} s | "
                 f"Fs: {fs:.1f} Hz | "
                 f"Lag: {lag:+.3f} s | "
@@ -384,7 +384,7 @@ client.conn.timeout = 10
 
 try:
 
-    print("Connecting...")
+    print("Connecting")
 
     client.connect()
 
@@ -398,8 +398,8 @@ try:
             target["cha"]
         )
 
-    print("Receiving EQM11 and EQM13 live data...")
-    print("Waiting for a full 10-second window...")
+    print("Receiving EQM06 and EQM10 live data")
+    print("Waiting for a full 10-second window")
     print("Press Ctrl+C to stop.")
 
     client.run()
