@@ -1,3 +1,5 @@
+import base64
+import io
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -9,380 +11,1011 @@ from scipy.optimize import least_squares
 from pyproj import Geod
 
 # FDSN client
-client = Client("EARTHSCOPE")
+client = Client("https://seiscomp.alertnepal.online")
+# Geodetic converter
+geod = Geod(ellps="WGS84")
 
-# Time window
-start = UTCDateTime("2026-08-26T02:52:00")
-end = UTCDateTime("2026-08-26T02:56:00")
+# Fetch and preprocess waveform
+def fetch_waveform(station,start,end,target_fs,freqmin,freqmax):
 
-# Processing settings
-target_fs = 20.0
-freqmin = 1.0
-freqmax = 8.0
-max_shift_seconds = 30.0
-velocity = 2.4
+    stream = client.get_waveforms(network=station["net"],station=station["sta"],location=station["loc"],channel=station["cha"],starttime=start,endtime=end)
 
-stations = {
-    "KKN": {"lat": 27.8000, "lon": 85.2790, "net": "NK", "chan": "BHZ", "loc": "*"},
-    "EVN": {"lat": 27.95865, "lon": 86.811653, "net": "IO", "chan": "BHZ", "loc": "*"},
-    "KNSET": {"lat": 27.65337, "lon": 85.302528, "net": "NQ", "chan": "HNZ", "loc": "01"}
-}
-
-# Fetch waveforms
-print("Fetching waveforms")
-st_kkn = client.get_waveforms(
-    network=stations["KKN"]["net"], station="KKN", location=stations["KKN"]["loc"], 
-    channel=stations["KKN"]["chan"], starttime=start, endtime=end
-)
-
-st_evn = client.get_waveforms(
-    network=stations["EVN"]["net"], station="EVN", location=stations["EVN"]["loc"], 
-    channel=stations["EVN"]["chan"], starttime=start, endtime=end
-)
-
-st_knset = client.get_waveforms(
-    network=stations["KNSET"]["net"], station="KNSET", location=stations["KNSET"]["loc"], 
-    channel=stations["KNSET"]["chan"], starttime=start, endtime=end
-)
-
-# Preprocess function
-def preprocess(stream, is_acceleration=False):
-    stream = stream.copy()
-    stream.merge(method=1, fill_value="interpolate")
+    stream.merge( method=1, fill_value="interpolate")
     stream.detrend("linear")
     stream.detrend("demean")
-    stream.taper(max_percentage=0.05, type="hann")
+    stream.taper( max_percentage=0.05, type="hann")
+    stream.interpolate(sampling_rate=target_fs,method="linear")
+    stream.filter("bandpass",freqmin=freqmin,freqmax=freqmax,corners=4,zerophase=True )
 
-    stream.interpolate(sampling_rate=target_fs, method="linear")
-    stream.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=4, zerophase=True)
-    
-    return stream
+    if len(stream) == 0:
+        raise RuntimeError(
+            f"No processed {station['sta']} waveform found."
+        )
 
+    return stream[0]
 
-# Process stations
+# Trim all traces to common time window
+def trim_to_common_window(traces):
 
-print("\nProcessing KKN")
-st_kkn = preprocess(st_kkn)
+    common_start = max(trace.stats.starttime for trace in traces.values())
 
-print("Processing EVN")
-st_evn = preprocess(st_evn)
+    common_end = min(trace.stats.endtime for trace in traces.values())
 
-print("Processing KNSET")
-st_knset = preprocess(st_knset)
+    if common_start >= common_end:raise RuntimeError("No common time window exists between stations.")
 
-# Check traces
-if len(st_kkn) == 0:
-    raise RuntimeError("No processed KKN waveform found.")
+    for trace in traces.values():trace.trim(starttime=common_start,endtime=common_end)
 
-if len(st_evn) == 0:
-    raise RuntimeError("No processed EVN waveform found.")
+# Convert matplotlib figure to base64
+def image_to_base64(fig):
+    buffer = io.BytesIO()
+    fig.savefig(buffer,format="png",dpi=140,bbox_inches="tight")
+    plt.close(fig)
 
-if len(st_knset) == 0:
-    raise RuntimeError("No processed KNSET waveform found.")
+    return base64.b64encode(buffer.getvalue()).decode()
 
-# Get first trace
-tr_kkn = st_kkn[0]
-tr_evn = st_evn[0]
-tr_knset = st_knset[0]
+# Create waveform plot
+def create_waveform_plot(traces):
+    fig, axes = plt.subplots(3,1,figsize=(12, 8),sharex=True)
+    for ax, (name, trace) in zip(axes,traces.items()):
 
-# # Print information
-# print("\nProcessed traces:")
-# print("\nKKN\n", tr_kkn)
-# print("\nEVN\n", tr_evn)
-# print("\nKNSET\n", tr_knset)
+        sampling_rate = (trace.stats.sampling_rate)
+        data = trace.data.astype(float)
+        time = (np.arange(len(data))/ sampling_rate)
+        ax.plot(time, data, linewidth=0.8)
+        ax.set_ylabel(name)
+        ax.grid(True, alpha=0.3)
 
-# Trim to common window
-common_start = max(tr_kkn.stats.starttime, tr_evn.stats.starttime, tr_knset.stats.starttime)
-common_end = min(tr_kkn.stats.endtime, tr_evn.stats.endtime, tr_knset.stats.endtime)
+    axes[-1].set_xlabel("Time since common start (seconds)" )
 
-# print("\nCommon time window:")
-# print("Start:", common_start)
-# print("End  :", common_end)
+    fig.suptitle("Three-Station Seismic Waveforms")
+    fig.tight_layout()
+    return image_to_base64(fig)
 
-# Trim to common window
-tr_kkn.trim(starttime=common_start, endtime=common_end)
-tr_evn.trim(starttime=common_start, endtime=common_end)
-tr_knset.trim(starttime=common_start, endtime=common_end)
+# Create spectrogram plot
+def create_spectrogram_plot(
+    traces,
+    fmin=1.0,
+    fmax=8.0
+):
 
-# # Check sampling rates
-# print("\nSampling rates:")
-# print("KKN   :", tr_kkn.stats.sampling_rate)
-# print("EVN   :", tr_evn.stats.sampling_rate)
-# print("KNSET :", tr_knset.stats.sampling_rate)
+    fig, axes = plt.subplots(3,1,figsize=(12, 9),sharex=True)
 
+    for ax, (name, trace) in zip(axes,traces.items()):
 
-# Hilbert envelope computation with optional smoothing
-def get_hilbert_envelope(trace, smooth_cutoff=0.5):
+        sampling_rate = (trace.stats.sampling_rate)
+        data = trace.data.astype(float)
+        nperseg = min(512,len(data))
+
+        if nperseg < 2:
+            raise RuntimeError(
+                f"Not enough samples for spectrogram at {name}."
+            )
+
+        noverlap = int(nperseg * 0.75 )
+        ax.specgram(
+            data,
+            NFFT=nperseg,
+            Fs=sampling_rate,
+            noverlap=noverlap
+        )
+        ax.set_ylabel( f"{name}\nFrequency (Hz)" )
+
+        ax.set_ylim(fmin,fmax)
+
+        ax.grid(True,alpha=0.2)
+
+    axes[-1].set_xlabel( "Time since common start (seconds)")
+
+    fig.suptitle(
+        f"Three-Station Frequency Spectrogram "
+        f"({fmin:g}–{fmax:g} Hz)"
+    )
+
+    fig.tight_layout()
+    return image_to_base64(fig)
+
+# Hilbert envelope computation
+def get_hilbert_envelope(trace,smooth_cutoff=0.5):
     signal = trace.data.astype(float)
     signal = signal - np.mean(signal)
 
     # Hilbert transform
-    analytic_signal = hilbert(signal)
+    analytic_signal = hilbert( signal)
 
     # Envelope
     envelope = np.abs(analytic_signal)
 
-    # Low-pass filter envelope to remove high-frequency noise spikes
+    # Smooth envelope
     if smooth_cutoff is not None:
+
         fs = trace.stats.sampling_rate
-        b, a = butter(N=2, Wn=smooth_cutoff / (0.5 * fs), btype="low")
-        envelope = filtfilt(b, a, envelope)
-        envelope = np.maximum(envelope, 0)
+        b, a = butter(
+            N=2,
+            Wn=smooth_cutoff / (
+                0.5 * fs
+            ),
+            btype="low"
+        )
+
+        envelope = filtfilt(
+            b,
+            a,
+            envelope
+        )
+
+        envelope = np.maximum(
+            envelope,
+            0
+        )
 
     return envelope
 
-# Calculate envelopes
-print("\nCalculating Hilbert envelopes")
-env_kkn = get_hilbert_envelope(tr_kkn, smooth_cutoff=0.5)
-env_evn = get_hilbert_envelope(tr_evn, smooth_cutoff=0.5)
-env_knset = get_hilbert_envelope(tr_knset, smooth_cutoff=0.5)
 
-
-# Calculate envelope lag
+# Calculate envelope lag using cross-correlation
 def calculate_envelope_lag(
     envelope_a,
     envelope_b,
     sampling_rate,
     max_shift_seconds
 ):
+
     # Make same length
-    min_len = min(len(envelope_a), len(envelope_b))
+    min_len = min(
+        len(envelope_a),
+        len(envelope_b)
+    )
+
     envelope_a = envelope_a[:min_len]
     envelope_b = envelope_b[:min_len]
 
     # Remove 5% from both edges
-    crop = int(0.05 * len(envelope_a))
-    envelope_a = envelope_a[crop:-crop]
-    envelope_b = envelope_b[crop:-crop]
+    crop = int(
+        0.05 * min_len
+    )
+
+    if crop > 0:
+
+        envelope_a = envelope_a[
+            crop:-crop
+        ]
+
+        envelope_b = envelope_b[
+            crop:-crop
+        ]
 
     # Remove envelope mean
-    envelope_a = envelope_a - np.mean(envelope_a)
-    envelope_b = envelope_b - np.mean(envelope_b)
+    envelope_a = (
+        envelope_a
+        - np.mean(envelope_a)
+    )
+
+    envelope_b = (
+        envelope_b
+        - np.mean(envelope_b)
+    )
 
     # Tukey taper
-    taper = windows.tukey(len(envelope_a), alpha=0.05)
+    taper = windows.tukey(
+        len(envelope_a),
+        alpha=0.05
+    )
+
     a = envelope_a * taper
     b = envelope_b * taper
 
     # Cross-correlation
-    correlation = correlate(a, b, mode="full")
-
-    # Corresponding lags
-    lags = correlation_lags(len(a), len(b), mode="full")
-
-    # Normalize
-    norm_factor = np.sqrt(np.sum(a ** 2) * np.sum(b ** 2))
-    if norm_factor == 0:
-        raise RuntimeError("Envelope has zero energy.")
-
-    correlation = correlation / norm_factor
-
-    # Convert lags to seconds
-    lag_seconds = lags / sampling_rate
-
-    # Limit lag search
-    max_shift_samples = int(round(max_shift_seconds * sampling_rate))
-
-    valid = (lags >= -max_shift_samples) & (lags <= max_shift_samples)
-    valid_corr = correlation[valid]
-    valid_lags = lags[valid]
-
-    # Find maximum correlation
-    peak_index = np.argmax(valid_corr)
-    lag_samples = valid_lags[peak_index]
-    lag_seconds_value = lag_samples / sampling_rate
-    max_correlation = valid_corr[peak_index]
-
-    return (
-        lag_seconds_value,
-        max_correlation,
-        correlation,
-        lag_seconds
+    correlation = correlate(
+        a,
+        b,
+        mode="full"
     )
 
-# Pairwise TDOA
-lag_kkn_evn, cc_kkn_evn, corr_kkn_evn, lags_kkn_evn = calculate_envelope_lag(
-    env_kkn, env_evn, target_fs, max_shift_seconds
-)
+    # Corresponding lags
+    lags = correlation_lags(
+        len(a),
+        len(b),
+        mode="full"
+    )
 
-lag_kkn_knset, cc_kkn_knset, corr_kkn_knset, lags_kkn_knset = calculate_envelope_lag(
-    env_kkn, env_knset, target_fs, max_shift_seconds
-)
+    # Normalize
+    norm_factor = np.sqrt(
+        np.sum(a ** 2)
+        *
+        np.sum(b ** 2)
+    )
 
-lag_evn_knset, cc_evn_knset, corr_evn_knset, lags_evn_knset = calculate_envelope_lag(
-    env_evn, env_knset, target_fs, max_shift_seconds
-)
+    if norm_factor == 0:
+        raise RuntimeError(
+            "Envelope has zero energy."
+        )
 
-# TDOA closure
-closure_error = lag_kkn_knset - (lag_kkn_evn + lag_evn_knset)
+    correlation = (
+        correlation
+        / norm_factor
+    )
 
-# Print results
-print("\nHilbert Envelope TDOA results:")
-print(f"KKN - EVN:   lag = {lag_kkn_evn:+.3f} s, CC = {cc_kkn_evn:.3f}")
-print(f"KKN - KNSET: lag = {lag_kkn_knset:+.3f} s, CC = {cc_kkn_knset:.3f}")
-print(f"EVN - KNSET: lag = {lag_evn_knset:+.3f} s, CC = {cc_evn_knset:.3f}")
-print(f"\nTDOA closure error: {closure_error:+.3f} s")
+    # Convert lags to seconds
+    lag_seconds = (
+        lags
+        / sampling_rate
+    )
+
+    # Limit lag search
+    max_shift_samples = int(
+        round(
+            max_shift_seconds
+            * sampling_rate
+        )
+    )
+
+    valid = (
+        (lags >= -max_shift_samples)
+        &
+        (lags <= max_shift_samples)
+    )
+
+    valid_corr = correlation[
+        valid
+    ]
+
+    valid_lags = lags[
+        valid
+    ]
+
+    if len(valid_corr) == 0:
+        raise RuntimeError(
+            "No valid lag values found."
+        )
+
+    # Find maximum correlation
+    peak_index = np.argmax(
+        valid_corr
+    )
+
+    lag_samples = (
+        valid_lags[peak_index]
+    )
+
+    lag_seconds_value = (
+        lag_samples
+        / sampling_rate
+    )
+
+    max_correlation = (
+        valid_corr[peak_index]
+    )
+
+    return {
+        "lag": float(
+            lag_seconds_value
+        ),
+
+        "cc_max": float(
+            max_correlation
+        ),
+
+        "lags_full": lag_seconds.tolist(),
+
+        "cc_full": correlation.tolist()
+    }
 
 
-
-# Triangulation Part
-
-# Use KKN as the local coordinate origin
-origin_lat = stations["KKN"]["lat"]
-origin_lon = stations["KKN"]["lon"]
-
-# Convert latitude/longitude to local Cartesian coordinates
-def latlon_to_xy(lat, lon):
+# Convert latitude/longitude to local X/Y coordinates
+def latlon_to_xy(origin_lat,origin_lon,lat,lon):
     distance, azimuth, _ = gps2dist_azimuth(origin_lat, origin_lon, lat, lon)
     azimuth_rad = np.radians(azimuth)
     x = (distance / 1000.0) * np.sin(azimuth_rad)
     y = (distance / 1000.0) * np.cos(azimuth_rad)
     return x, y
 
+# Convert local X/Y back to latitude/longitude
+def xy_to_latlon(origin_lat,origin_lon,x,y):
+    distance = np.sqrt(x ** 2 + y ** 2)
+    azimuth = np.degrees(np.arctan2(x,y))
+    source_lon, source_lat, _ = geod.fwd(origin_lon,origin_lat,azimuth,distance * 1000.0)
 
-station_xy = {name: latlon_to_xy(info["lat"], info["lon"]) for name, info in stations.items()}
+    return source_lat, source_lon
 
-
-# TDOA - distance difference
-delta_kkn_evn = velocity * (-lag_kkn_evn)
-delta_kkn_knset = velocity * (-lag_kkn_knset)
-delta_evn_knset = velocity * (-lag_evn_knset)
-
-x_kkn, y_kkn = station_xy["KKN"]
-x_knset, y_knset = station_xy["KNSET"]
-
-station_distance = np.sqrt(
-    (x_knset - x_kkn) ** 2 +
-    (y_knset - y_kkn) ** 2
-)
-
-# print("\nKKN-KNSET geometry:")
-# print(f"Station separation: {station_distance:.3f} km")
-# print(f"Measured distance difference: {abs(delta_kkn_knset):.3f} km")
-# print(f"Difference: {station_distance - abs(delta_kkn_knset):.3f} km")
-
-# Least Squares method
-
-def tdoa_residuals(xy):
+# Calculate TDOA residuals
+def tdoa_residuals(xy,station_xy,delta,station_a,station_b,station_c):
     x, y = xy
-    x_kkn, y_kkn = station_xy["KKN"]
-    x_evn, y_evn = station_xy["EVN"]
-    x_knset, y_knset = station_xy["KNSET"]
+    x_a, y_a = station_xy[station_a]
+    x_b, y_b = station_xy[station_b]
+    x_c, y_c = station_xy[station_c]
+    d_a = np.sqrt((x - x_a) ** 2+(y - y_a) ** 2)
+    d_b = np.sqrt((x - x_b) ** 2+(y - y_b) ** 2)
 
-    d_kkn = np.sqrt((x - x_kkn) ** 2 + (y - y_kkn) ** 2)
-    d_evn = np.sqrt((x - x_evn) ** 2 + (y - y_evn) ** 2)
-    d_knset = np.sqrt((x - x_knset) ** 2 + (y - y_knset) ** 2)
+    d_c = np.sqrt((x - x_c) ** 2+(y - y_c) ** 2)
+    res_1 = ((d_b - d_a)-delta[f"{station_a}-{station_b}"])
+    res_2 = ((d_c - d_a)-delta[f"{station_a}-{station_c}"])
+    res_3 = ((d_c - d_b)-delta[f"{station_b}-{station_c}"])
 
-    res_1 = (d_evn - d_kkn) - delta_kkn_evn
-    res_2 = (d_knset - d_kkn) - delta_kkn_knset
-    res_3 = (d_knset - d_evn) - delta_evn_knset
+    return [res_1,res_2,res_3]
 
-    return [res_1, res_2, res_3]
+# Least-squares source location
+def find_source_location(
+    station_xy,
+    delta,
+    station_a,
+    station_b,
+    station_c
+):
 
-initial_guess = [0.0, 0.0]
-opt_res = least_squares(tdoa_residuals, initial_guess)
-x_src, y_src = opt_res.x
+    initial_guess = [0.0,0.0]
 
-print(f"Inverted Source Location using least square:")
-print(f"X (East) : {x_src:+.3f} km from KKN")
-print(f"Y (North): {y_src:+.3f} km from KKN")
-print(f"Residual norm: {opt_res.cost:.4f}")
+    result = least_squares(
+        tdoa_residuals,
+        initial_guess,
+        args=(
+            station_xy,
+            delta,
+            station_a,
+            station_b,
+            station_c
+        )
+    )
 
-# Hyperbola intersection method
+    x_src, y_src = result.x
 
-# Get station coordinates
-x_kkn, y_kkn = station_xy["KKN"]
-x_evn, y_evn = station_xy["EVN"]
-x_knset, y_knset = station_xy["KNSET"]
+    residual_norm = np.linalg.norm(
+        tdoa_residuals(
+            result.x,
+            station_xy,
+            delta,
+            station_a,
+            station_b,
+            station_c
+        )
+    )
 
-
-# Create plotting region
-margin = 500.0
-resolution = 0.5
-
-xmin = min(x_kkn, x_evn, x_knset) - margin
-xmax = max(x_kkn, x_evn, x_knset) + margin
-
-ymin = min(y_kkn, y_evn, y_knset) - margin
-ymax = max(y_kkn, y_evn, y_knset) + margin
-
-x = np.arange(xmin, xmax, resolution)
-y = np.arange(ymin, ymax, resolution)
-
-X, Y = np.meshgrid(x, y)
-
-
-# Distance from every grid point to each station
-D_KKN = np.sqrt(
-    (X - x_kkn) ** 2 +
-    (Y - y_kkn) ** 2
-)
-
-D_EVN = np.sqrt(
-    (X - x_evn) ** 2 +
-    (Y - y_evn) ** 2
-)
-
-D_KNSET = np.sqrt(
-    (X - x_knset) ** 2 +
-    (Y - y_knset) ** 2
-)
+    return (
+        float(x_src),
+        float(y_src),
+        float(residual_norm)
+    )
 
 
-# Hyperbola equations
+# Create hyperbola plot
+def create_hyperbola_plot(
+    station_xy,
+    delta,
+    source_xy
+):
 
-H_KKN_EVN = (D_EVN- D_KKN- delta_kkn_evn)
-H_KKN_KNSET = (D_KNSET- D_KKN- delta_kkn_knset)
-H_EVN_KNSET = (D_KNSET- D_EVN- delta_evn_knset)
+    # Get station coordinates
+    xs = [
+        xy[0]
+        for xy in station_xy.values()
+    ]
 
-# print("KKN-KNSET hyperbola:")
-# print("Minimum H:", np.nanmin(H_KKN_KNSET))
-# print("Maximum H:", np.nanmax(H_KKN_KNSET))
+    ys = [
+        xy[1]
+        for xy in station_xy.values()
+    ]
 
-# Convert local source X,Y back to latitude/longitude
-geod = Geod(ellps="WGS84")
-source_distance = np.sqrt(x_src**2 + y_src**2)
-source_azimuth = np.degrees(np.arctan2(x_src, y_src))
-source_lon, source_lat, _ = geod.fwd(origin_lon,origin_lat,source_azimuth,source_distance * 1000.0)
+    # Plotting region
+    margin = 300.0
+    resolution = 0.5
 
-print("\nLeast-squares source geographic location:")
-print(f"Latitude  : {source_lat:.6f}")
-print(f"Longitude : {source_lon:.6f}")
+    xmin = min(xs) - margin
+    xmax = max(xs) + margin
 
-# Plot hyperbolas
-plt.figure(figsize=(12, 10))
+    ymin = min(ys) - margin
+    ymax = max(ys) + margin
 
-plt.contour(X,Y,H_KKN_EVN,levels=[0],colors="blue",linewidths=2.5)
-plt.contour(X,Y,H_KKN_KNSET,levels=[0],colors="red",linewidths=2.5)
-plt.contour(X,Y,H_EVN_KNSET,levels=[0],colors="green",linewidths=2.5)
+    x = np.arange(
+        xmin,
+        xmax,
+        resolution
+    )
 
-# Plot stations
-plt.scatter(x_kkn,y_kkn,marker=".",s=160,zorder=5)
-plt.scatter(x_evn,y_evn,marker=".",s=160,zorder=5)
-plt.scatter(x_knset,y_knset,marker=".",s=160,zorder=5)
+    y = np.arange(
+        ymin,
+        ymax,
+        resolution
+    )
 
-# Station labels
-plt.text(x_kkn + 5, y_kkn + 5,"KKN", fontsize=12, fontweight="bold")
-plt.text(x_evn + 5,y_evn + 5,"EVN",fontsize=12,fontweight="bold")
-plt.text( x_knset + 5, y_knset + 5, "KNSET", fontsize=12, fontweight="bold")
+    X, Y = np.meshgrid(
+        x,
+        y
+    )
 
-# Plot least-squares source
-plt.scatter(x_src,y_src,marker="*",s=300,zorder=10,label="TDOA inverted source")
+    # Distance from every grid point
+    # to every station
+    D = {}
 
-# Legend
-legend_lines = [
-    Line2D([0],[0],color="blue",linewidth=2.5,label="KKN–EVN hyperbola"),
-    Line2D([0],[0],color="red",linewidth=2.5,label="KKN–KNSET hyperbola"),
-    Line2D([0],[0],color="green",linewidth=2.5,label="EVN–KNSET hyperbola"),
-    Line2D([0],[0],marker=".",color="black",linestyle="None",markersize=10,label="Station"),
-    Line2D([0],[0],marker="*",color="black",linestyle="None",markersize=15, label="Least-squares source")
-]
+    for name, (
+        station_x,
+        station_y
+    ) in station_xy.items():
 
-plt.legend(handles=legend_lines,loc="best")
-plt.xlabel( "East-West distance from KKN (km)")
-plt.ylabel("North-South distance from KKN (km)")
-plt.title("Three-Station TDOA Hyperbola Intersection\n"f"Velocity = {velocity:.2f} km/s")
-plt.grid(True)
-plt.axis("equal")
-plt.tight_layout()
-plt.show()
+        D[name] = np.sqrt(
+            (X - station_x) ** 2
+            +
+            (Y - station_y) ** 2
+        )
+
+    # Create figure
+    fig, ax = plt.subplots(
+        figsize=(10, 8)
+    )
+
+    colors = [
+        "blue",
+        "red",
+        "green"
+    ]
+
+    legend_lines = []
+
+    # Plot hyperbolas
+    for i, (
+        pair,
+        distance_difference
+    ) in enumerate(
+        delta.items()
+    ):
+
+        station_a, station_b = (
+            pair.split("-")
+        )
+
+        H = (
+            D[station_b]
+            -
+            D[station_a]
+            -
+            distance_difference
+        )
+
+        ax.contour(
+            X,
+            Y,
+            H,
+            levels=[0],
+            colors=colors[i],
+            linewidths=2.5
+        )
+
+        legend_lines.append(
+            Line2D(
+                [0],
+                [0],
+                color=colors[i],
+                linewidth=2.5,
+                label=(
+                    f"{station_a}–"
+                    f"{station_b} hyperbola"
+                )
+            )
+        )
+
+    # Plot stations
+    for name, (
+        station_x,
+        station_y
+    ) in station_xy.items():
+
+        ax.scatter(
+            station_x,
+            station_y,
+            marker=".",
+            s=160,
+            zorder=5
+        )
+
+        ax.text(
+            station_x + 5,
+            station_y + 5,
+            name,
+            fontsize=12,
+            fontweight="bold"
+        )
+
+    legend_lines.append(
+        Line2D(
+            [0],
+            [0],
+            marker=".",
+            color="black",
+            linestyle="None",
+            markersize=10,
+            label="Station"
+        )
+    )
+
+    # Plot source
+    source_x, source_y = source_xy
+
+    ax.scatter(
+        source_x,
+        source_y,
+        marker="*",
+        s=300,
+        zorder=10
+    )
+
+    legend_lines.append(
+        Line2D(
+            [0],
+            [0],
+            marker="*",
+            color="black",
+            linestyle="None",
+            markersize=15,
+            label="Least-squares source"
+        )
+    )
+
+    # Labels
+    ax.legend(
+        handles=legend_lines,
+        loc="best"
+    )
+
+    ax.set_xlabel(
+        "East-West distance from origin station (km)"
+    )
+
+    ax.set_ylabel(
+        "North-South distance from origin station (km)"
+    )
+
+    ax.set_title(
+        "Three-Station TDOA Hyperbola Intersection"
+    )
+
+    ax.grid(True)
+
+    ax.axis("equal")
+
+    fig.tight_layout()
+
+    return image_to_base64(fig)
+
+
+# Main analysis function
+def run_triangulation(
+    stations,
+    start,
+    end,
+    fs=20.0,
+    fmin=1.0,
+    fmax=8.0,
+    smooth_cutoff=0.5,
+    max_shift_seconds=30.0,
+    velocity=2.4
+):
+
+    if len(stations) != 3:
+
+        raise ValueError(
+            "This method needs exactly 3 stations."
+        )
+
+    # Convert times
+    start = UTCDateTime(
+        start
+    )
+
+    end = UTCDateTime(
+        end
+    )
+
+    # Fetch waveforms
+    print(
+        "Fetching waveforms"
+    )
+
+    traces = {}
+
+    for station in stations:
+
+        print(
+            f"Fetching {station['sta']}"
+        )
+
+        traces[
+            station["sta"]
+        ] = fetch_waveform(
+            station,
+            start,
+            end,
+            fs,
+            fmin,
+            fmax
+        )
+
+    # Trim to common window
+    print(
+        "Trimming to common window"
+    )
+
+    trim_to_common_window(
+        traces
+    )
+
+    # Create waveform and spectrogram plots
+    print(
+        "Creating waveform plots"
+    )
+
+    waveform_plot = create_waveform_plot(
+        traces
+    )
+
+    spectrogram_plot = create_spectrogram_plot(
+        traces,
+        fmin=fmin,
+        fmax=fmax
+    )
+
+    # Calculate Hilbert envelopes
+    print(
+        "Calculating Hilbert envelopes"
+    )
+
+    envelopes = {}
+
+    for name, trace in traces.items():
+
+        envelopes[name] = (
+            get_hilbert_envelope(
+                trace,
+                smooth_cutoff
+            )
+        )
+
+    # Station names
+    station_a = stations[0]["sta"]
+    station_b = stations[1]["sta"]
+    station_c = stations[2]["sta"]
+
+    # Calculate pairwise TDOA
+    print(
+        "Calculating TDOA"
+    )
+
+    lag_ab = calculate_envelope_lag(
+        envelopes[station_a],
+        envelopes[station_b],
+        fs,
+        max_shift_seconds
+    )
+
+    lag_ac = calculate_envelope_lag(
+        envelopes[station_a],
+        envelopes[station_c],
+        fs,
+        max_shift_seconds
+    )
+
+    lag_bc = calculate_envelope_lag(
+        envelopes[station_b],
+        envelopes[station_c],
+        fs,
+        max_shift_seconds
+    )
+
+    # TDOA closure
+    closure_error = (
+        lag_ac["lag"]
+        -
+        (
+            lag_ab["lag"]
+            +
+            lag_bc["lag"]
+        )
+    )
+
+    print(
+        "\nHilbert Envelope TDOA results:"
+    )
+
+    print(
+        f"{station_a} - {station_b}: "
+        f"lag = {lag_ab['lag']:+.3f} s, "
+        f"CC = {lag_ab['cc_max']:.3f}"
+    )
+
+    print(
+        f"{station_a} - {station_c}: "
+        f"lag = {lag_ac['lag']:+.3f} s, "
+        f"CC = {lag_ac['cc_max']:.3f}"
+    )
+
+    print(
+        f"{station_b} - {station_c}: "
+        f"lag = {lag_bc['lag']:+.3f} s, "
+        f"CC = {lag_bc['cc_max']:.3f}"
+    )
+
+    print(
+        f"\nTDOA closure error: "
+        f"{closure_error:+.3f} s"
+    )
+
+    # Convert TDOA to distance differences
+    delta_ab = (
+        velocity
+        *
+        (-lag_ab["lag"])
+    )
+
+    delta_ac = (
+        velocity
+        *
+        (-lag_ac["lag"])
+    )
+
+    delta_bc = (
+        velocity
+        *
+        (-lag_bc["lag"])
+    )
+
+    delta = {
+        f"{station_a}-{station_b}": delta_ab,
+        f"{station_a}-{station_c}": delta_ac,
+        f"{station_b}-{station_c}": delta_bc
+    }
+
+    # Use first station as local coordinate origin
+    origin = stations[0]
+
+    origin_lat = origin["lat"]
+    origin_lon = origin["lon"]
+
+    # Convert stations to X/Y
+    station_xy = {}
+
+    for station in stations:
+
+        station_xy[
+            station["sta"]
+        ] = latlon_to_xy(
+            origin_lat,
+            origin_lon,
+            station["lat"],
+            station["lon"]
+        )
+
+    # Least-squares source location
+    print(
+        "\nCalculating source location"
+    )
+
+    x_src, y_src, residual_norm = (
+        find_source_location(
+            station_xy,
+            delta,
+            station_a,
+            station_b,
+            station_c
+        )
+    )
+
+    print(
+        f"X (East) : {x_src:+.3f} km"
+    )
+
+    print(
+        f"Y (North): {y_src:+.3f} km"
+    )
+
+    print(
+        f"Residual norm: "
+        f"{residual_norm:.4f} km"
+    )
+
+    # Convert source X/Y to latitude/longitude
+    source_lat, source_lon = (
+        xy_to_latlon(
+            origin_lat,
+            origin_lon,
+            x_src,
+            y_src
+        )
+    )
+
+    print(
+        "\nLeast-squares source geographic location:"
+    )
+
+    print(
+        f"Latitude  : {source_lat:.6f}"
+    )
+
+    print(
+        f"Longitude : {source_lon:.6f}"
+    )
+
+    # Create hyperbola plot
+    print(
+        "Creating hyperbola plot"
+    )
+
+    plot_png = create_hyperbola_plot(
+        station_xy,
+        delta,
+        (x_src, y_src)
+    )
+
+    # Prepare pairwise results for website
+    pairs = [
+        {
+            "a": station_a,
+            "b": station_b,
+            **lag_ab
+        },
+        {
+            "a": station_a,
+            "b": station_c,
+            **lag_ac
+        },
+        {
+            "a": station_b,
+            "b": station_c,
+            **lag_bc
+        }
+    ]
+
+    # Prepare station coordinates
+    station_coordinates = {}
+
+    for station in stations:
+
+        station_coordinates[
+            station["sta"]
+        ] = {
+            "lat": station["lat"],
+            "lon": station["lon"]
+        }
+
+    # Final result returned to Flask
+    return {
+
+        "pairs": pairs,
+
+        "closure_error": float(
+            closure_error
+        ),
+
+        "source": {
+
+            "lat": float(
+                source_lat
+            ),
+
+            "lon": float(
+                source_lon
+            ),
+
+            "x_km": float(
+                x_src
+            ),
+
+            "y_km": float(
+                y_src
+            ),
+
+            "residual_norm": float(
+                residual_norm
+            ),
+
+            "velocity": float(
+                velocity
+            )
+        },
+
+        "stations": station_coordinates,
+
+        "waveform_plot": waveform_plot,
+
+        "spectrogram_plot": spectrogram_plot,
+
+        "plot_png": plot_png,
+
+        "settings": {
+
+            "start": str(
+                start
+            ),
+
+            "end": str(
+                end
+            ),
+
+            "sampling_rate": float(
+                fs
+            ),
+
+            "freqmin": float(
+                fmin
+            ),
+
+            "freqmax": float(
+                fmax
+            ),
+
+            "smooth_cutoff": float(
+                smooth_cutoff
+            ),
+
+            "max_shift_seconds": float(
+                max_shift_seconds
+            ),
+
+            "velocity": float(
+                velocity
+            )
+        }
+    }
+
+
+# Run directly from Python
+if __name__ == "__main__":
+
+    stations = [
+
+        {
+            "sta": "KKN",
+            "lat": 27.8000,
+            "lon": 85.2790,
+            "net": "NK",
+            "cha": "BHZ",
+            "loc": "*"
+        },
+
+        {
+            "sta": "EVN",
+            "lat": 27.95865,
+            "lon": 86.811653,
+            "net": "IO",
+            "cha": "BHZ",
+            "loc": "*"
+        },
+
+        {
+            "sta": "EQM10",
+            "lat": 28.299517,
+            "lon": 83.960148,
+            "net": "NP",
+            "cha": "EHZ",
+            "loc": "*"
+        }
+
+    ]
+
+    start = (
+        "2026-08-26T02:52:00"
+    )
+
+    end = (
+        "2026-08-26T02:56:00"
+    )
+
+    result = run_triangulation(
+
+        stations=stations,
+
+        start=start,
+
+        end=end,
+
+        fs=20.0,
+
+        fmin=1.0,
+
+        fmax=8.0,
+
+        smooth_cutoff=0.5,
+
+        max_shift_seconds=30.0,
+
+        velocity=2.4
+    )
+
+    print(
+        "\nAnalysis completed."
+    )

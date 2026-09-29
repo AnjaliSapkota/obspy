@@ -4,17 +4,14 @@ client = Client("https://seiscomp.alertnepal.online")
 
 inventory = client.get_stations(
     network="NP",
+    station="EQM10",
     level="station"
 )
 
 for network in inventory:
     for station in network:
-        print(
-            station.code,
-            "|",
-            station.latitude,
-            "|",
-            station.longitude,
-            "|",
-            station.elevation
-        )
+        print("Network:", network.code)
+        print("Station:", station.code)
+        print("Latitude:", station.latitude)
+        print("Longitude:", station.longitude)
+        print("Elevation:", station.elevation)
