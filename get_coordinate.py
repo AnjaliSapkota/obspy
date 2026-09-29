@@ -4,7 +4,7 @@ client = Client("https://seiscomp.alertnepal.online")
 
 inventory = client.get_stations(
     network="NP",
-    station="EQM10",
+    station="EQM11",
     level="station"
 )
 

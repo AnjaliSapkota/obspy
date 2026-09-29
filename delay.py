@@ -21,53 +21,24 @@ max_shift_seconds = 30.0
 # Fetch waveforms
 print("Fetching waveforms...")
 
-st_kkn = client.get_waveforms(
-    network="NK",
-    station="KKN",
-    location="*",
-    channel="BHZ",
-    starttime=start,
-    endtime=end
-)
+st_kkn = client.get_waveforms(network="NK",station="KKN",location="*",channel="BHZ",starttime=start,endtime=end)
 
-st_evn = client.get_waveforms(
-    network="IO",
-    station="EVN",
-    location="*",
-    channel="BHZ",
-    starttime=start,
-    endtime=end
-)
+st_evn = client.get_waveforms(network="IO",station="EVN",location="*",channel="BHZ",starttime=start,endtime=end)
 
-st_knset = client.get_waveforms(
-    network="NQ",
-    station="KNSET",
-    location="01",
-    channel="HNZ",
-    starttime=start,
-    endtime=end
-)
-
+st_knset = client.get_waveforms(network="NQ",station="KNSET",location="01",channel="HNZ",starttime=start,endtime=end)
 
 # Preprocess function
 def preprocess(stream, is_acceleration=False):
     stream = stream.copy()
 
     # Merge segments
-    stream.merge(
-        method=1,
-        fill_value="interpolate"
-    )
-
+    stream.merge(method=1,fill_value="interpolate")
     # Remove trend and mean
     stream.detrend("linear")
     stream.detrend("demean")
 
     # Taper edges
-    stream.taper(
-        max_percentage=0.05,
-        type="hann"
-    )
+    stream.taper(max_percentage=0.05,type="hann")
 
     # # Convert acceleration (m/s^2) to velocity (m/s) if needed
     # if is_acceleration:
@@ -77,31 +48,22 @@ def preprocess(stream, is_acceleration=False):
     #     stream.detrend("linear")
 
     # Interpolate to common target sampling rate
-    stream.interpolate(
-        sampling_rate=target_fs,
-        method="linear"
-    )
+    stream.interpolate(sampling_rate=target_fs,method="linear")
 
     # Bandpass filter
-    stream.filter(
-        "bandpass",
-        freqmin=freqmin,
-        freqmax=freqmax,
-        corners=4,
-        zerophase=True
-    )
+    stream.filter("bandpass",freqmin=freqmin,freqmax=freqmax,corners=4,zerophase=True)
 
     return stream
 
 
 # Process stations
-print("\nProcessing KKN...")
+# print("\nProcessing KKN")
 # st_kkn = preprocess(st_kkn, is_acceleration=False)
 
-# print("Processing EVN...")
+# print("Processing EVN")
 # st_evn = preprocess(st_evn, is_acceleration=False)
 
-# print("Processing KNSET...")
+# print("Processing KNSET")
 # st_knset = preprocess(st_knset, is_acceleration=True)
 
 print("\nProcessing KKN")

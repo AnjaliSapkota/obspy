@@ -7,12 +7,12 @@ import matplotlib.dates as mdates
 
 client = Client("https://seiscomp.alertnepal.online")
 
-start = UTCDateTime("2026-08-26T02:50:00")
-end   = UTCDateTime("2026-08-26T04:00:00")
+start = UTCDateTime("2026-08-26T02:45:00")
+end   = UTCDateTime("2026-08-26T03:00:00")
 
 # st = client.get_waveforms(network="IO", station="EVN", location="*", channel="HHZ", starttime=start, endtime=end)
 
-st = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
+st = client.get_waveforms(network="NP", station="EQM10", location="*", channel="EHZ", starttime=start, endtime=end)
 
 st.merge(fill_value="latest")
 tr = st[0].copy()

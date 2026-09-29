@@ -18,7 +18,7 @@ max_shift_seconds = 30.0
 
 st_kkn = client.get_waveforms(network="NK", station="KKN", location="*", channel="BHZ", starttime=start, endtime=end)
 st_evn = client.get_waveforms(network="IO", station="EVN", location="*", channel="BHZ", starttime=start, endtime=end)
-st_eqm10 = client.get_waveforms(network="NP", station="EQM10", location="*", channel="HNZ", starttime=start, endtime=end)
+st_eqm10 = client.get_waveforms(network="NP", station="EQM10", location="*", channel="EHZ", starttime=start, endtime=end)
 
 # Merge gaps or segments
 st_kkn.merge(method=1, fill_value="interpolate")

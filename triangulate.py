@@ -17,7 +17,6 @@ geod = Geod(ellps="WGS84")
 
 # Fetch and preprocess waveform
 def fetch_waveform(station,start,end,target_fs,freqmin,freqmax):
-
     stream = client.get_waveforms(network=station["net"],station=station["sta"],location=station["loc"],channel=station["cha"],starttime=start,endtime=end)
 
     stream.merge( method=1, fill_value="interpolate")
@@ -27,22 +26,15 @@ def fetch_waveform(station,start,end,target_fs,freqmin,freqmax):
     stream.interpolate(sampling_rate=target_fs,method="linear")
     stream.filter("bandpass",freqmin=freqmin,freqmax=freqmax,corners=4,zerophase=True )
 
-    if len(stream) == 0:
-        raise RuntimeError(
-            f"No processed {station['sta']} waveform found."
-        )
+    if len(stream) == 0: raise RuntimeError(f"No processed {station['sta']} waveform found.")
 
     return stream[0]
 
 # Trim all traces to common time window
 def trim_to_common_window(traces):
-
     common_start = max(trace.stats.starttime for trace in traces.values())
-
     common_end = min(trace.stats.endtime for trace in traces.values())
-
     if common_start >= common_end:raise RuntimeError("No common time window exists between stations.")
-
     for trace in traces.values():trace.trim(starttime=common_start,endtime=common_end)
 
 # Convert matplotlib figure to base64
@@ -72,16 +64,9 @@ def create_waveform_plot(traces):
     return image_to_base64(fig)
 
 # Create spectrogram plot
-def create_spectrogram_plot(
-    traces,
-    fmin=1.0,
-    fmax=8.0
-):
-
+def create_spectrogram_plot(traces,fmin=1.0,fmax=8.0):
     fig, axes = plt.subplots(3,1,figsize=(12, 9),sharex=True)
-
     for ax, (name, trace) in zip(axes,traces.items()):
-
         sampling_rate = (trace.stats.sampling_rate)
         data = trace.data.astype(float)
         nperseg = min(512,len(data))
@@ -118,38 +103,16 @@ def create_spectrogram_plot(
 def get_hilbert_envelope(trace,smooth_cutoff=0.5):
     signal = trace.data.astype(float)
     signal = signal - np.mean(signal)
-
-    # Hilbert transform
     analytic_signal = hilbert( signal)
-
-    # Envelope
     envelope = np.abs(analytic_signal)
 
     # Smooth envelope
     if smooth_cutoff is not None:
-
         fs = trace.stats.sampling_rate
-        b, a = butter(
-            N=2,
-            Wn=smooth_cutoff / (
-                0.5 * fs
-            ),
-            btype="low"
-        )
-
-        envelope = filtfilt(
-            b,
-            a,
-            envelope
-        )
-
-        envelope = np.maximum(
-            envelope,
-            0
-        )
-
+        b, a = butter(N=2,Wn=smooth_cutoff / (0.5 * fs),btype="low")
+        envelope = filtfilt(b,a,envelope)
+        envelope = np.maximum(envelope,0)
     return envelope
-
 
 # Calculate envelope lag using cross-correlation
 def calculate_envelope_lag(
@@ -301,20 +264,24 @@ def calculate_envelope_lag(
 
 
 # Convert latitude/longitude to local X/Y coordinates
-def latlon_to_xy(origin_lat,origin_lon,lat,lon):
-    distance, azimuth, _ = gps2dist_azimuth(origin_lat, origin_lon, lat, lon)
-    azimuth_rad = np.radians(azimuth)
-    x = (distance / 1000.0) * np.sin(azimuth_rad)
-    y = (distance / 1000.0) * np.cos(azimuth_rad)
-    return x, y
 
-# Convert local X/Y back to latitude/longitude
-def xy_to_latlon(origin_lat,origin_lon,x,y):
-    distance = np.sqrt(x ** 2 + y ** 2)
-    azimuth = np.degrees(np.arctan2(x,y))
-    source_lon, source_lat, _ = geod.fwd(origin_lon,origin_lat,azimuth,distance * 1000.0)
+from pyproj import Transformer
 
-    return source_lat, source_lon
+# UTM Projection for Nepal (Zone 45N, EPSG:32645)
+transformer_to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
+transformer_to_wgs = Transformer.from_crs("EPSG:32645", "EPSG:4326", always_xy=True)
+
+def latlon_to_xy(origin_lat, origin_lon, lat, lon):
+    origin_x, origin_y = transformer_to_utm.transform(origin_lon, origin_lat)
+    target_x, target_y = transformer_to_utm.transform(lon, lat)
+    return (target_x - origin_x) / 1000.0, (target_y - origin_y) / 1000.0
+
+def xy_to_latlon(origin_lat, origin_lon, x_km, y_km):
+    origin_x, origin_y = transformer_to_utm.transform(origin_lon, origin_lat)
+    target_x = origin_x + (x_km * 1000.0)
+    target_y = origin_y + (y_km * 1000.0)
+    lon, lat = transformer_to_wgs.transform(target_x, target_y)
+    return lat, lon
 
 # Calculate TDOA residuals
 def tdoa_residuals(xy,station_xy,delta,station_a,station_b,station_c):
@@ -333,16 +300,8 @@ def tdoa_residuals(xy,station_xy,delta,station_a,station_b,station_c):
     return [res_1,res_2,res_3]
 
 # Least-squares source location
-def find_source_location(
-    station_xy,
-    delta,
-    station_a,
-    station_b,
-    station_c
-):
-
+def find_source_location(station_xy,delta,station_a,station_b,station_c):
     initial_guess = [0.0,0.0]
-
     result = least_squares(
         tdoa_residuals,
         initial_guess,
@@ -393,15 +352,13 @@ def create_hyperbola_plot(
         for xy in station_xy.values()
     ]
 
-    # Plotting region
-    margin = 300.0
+    all_x = xs + [source_xy[0]]
+    all_y = ys + [source_xy[1]]
+    margin = max(max(all_x) - min(all_x), max(all_y) - min(all_y)) * 0.2 + 50.0
+    xmin, xmax = min(all_x) - margin, max(all_x) + margin
+    ymin, ymax = min(all_y) - margin, max(all_y) + margin
+  
     resolution = 0.5
-
-    xmin = min(xs) - margin
-    xmax = max(xs) + margin
-
-    ymin = min(ys) - margin
-    ymax = max(ys) + margin
 
     x = np.arange(
         xmin,
@@ -583,8 +540,8 @@ def run_triangulation(
     fmin=1.0,
     fmax=8.0,
     smooth_cutoff=0.5,
-    max_shift_seconds=30.0,
-    velocity=2.4
+    max_shift_seconds=50.0,
+    velocity=3
 ):
 
     if len(stations) != 3:
@@ -1013,7 +970,7 @@ if __name__ == "__main__":
 
         max_shift_seconds=30.0,
 
-        velocity=2.4
+        velocity=3
     )
 
     print(

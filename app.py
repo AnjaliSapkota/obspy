@@ -103,11 +103,6 @@ th{color:var(--mute);font-weight:500}
 <body>
 <header>
   <h1>TDOA Tremor Triangulation</h1>
-  <p>
-    Three fixed stations are used to estimate a disturbance location from time-difference-of-arrival (TDOA) measurements.
-    Envelope lags are obtained from a Butterworth-smoothed Hilbert envelope and cross-correlation. The measured time differences
-    are converted to distance differences using the selected fixed propagation velocity, and the source is estimated using a least-squares hyperbolic localization model.
-  </p>
 </header>
 
 <main>
@@ -261,7 +256,7 @@ function show(d){
     document.getElementById('big').innerHTML = `
         <div><span>Estimated latitude</span><b>${s.lat.toFixed(4)}&deg; N</b></div>
         <div><span>Estimated longitude</span><b>${s.lon.toFixed(4)}&deg; E</b></div>
-        <div><span>Velocity (fixed)</span><b>${s.velocity.toFixed(2)} km/s</b></div>
+        <div><span>Velocity</span><b>${s.velocity.toFixed(2)} km/s</b></div>
         <div><span>TDOA closure error</span><b>${d.closure_error.toFixed(3)} s</b></div>
     `;
 
