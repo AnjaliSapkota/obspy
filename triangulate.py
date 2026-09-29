@@ -6,6 +6,7 @@ from obspy.clients.fdsn import Client
 from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows
 from obspy.geodetics import gps2dist_azimuth
 from scipy.optimize import least_squares
+from pyproj import Geod
 
 # FDSN client
 client = Client("EARTHSCOPE")
@@ -19,12 +20,12 @@ target_fs = 20.0
 freqmin = 1.0
 freqmax = 8.0
 max_shift_seconds = 30.0
-velocity = 2.5
+velocity = 2.4
 
 stations = {
-    "KKN": {"lat": 27.8000, "lon": 85.2790, "net": "NK", "chan": "BHZ", "loc": "*", "is_acc": False},
-    "EVN": {"lat": 27.95865, "lon": 86.811653, "net": "IO", "chan": "BHZ", "loc": "*", "is_acc": False},
-    "KNSET": {"lat": 27.65337, "lon": 85.302528, "net": "NQ", "chan": "HNZ", "loc": "01", "is_acc": True}
+    "KKN": {"lat": 27.8000, "lon": 85.2790, "net": "NK", "chan": "BHZ", "loc": "*"},
+    "EVN": {"lat": 27.95865, "lon": 86.811653, "net": "IO", "chan": "BHZ", "loc": "*"},
+    "KNSET": {"lat": 27.65337, "lon": 85.302528, "net": "NQ", "chan": "HNZ", "loc": "01"}
 }
 
 # Fetch waveforms
@@ -51,12 +52,6 @@ def preprocess(stream, is_acceleration=False):
     stream.detrend("linear")
     stream.detrend("demean")
     stream.taper(max_percentage=0.05, type="hann")
-    # # Convert acceleration (m/s^2) to velocity (m/s) if needed
-    # if is_acceleration:
-    #     stream.integrate(method="cumtrapz")
-    #     # High-pass filter immediately after to suppress integration drift
-    #     stream.filter("highpass", freq=0.1)
-    #     stream.detrend("linear")
 
     stream.interpolate(sampling_rate=target_fs, method="linear")
     stream.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=4, zerophase=True)
@@ -65,14 +60,6 @@ def preprocess(stream, is_acceleration=False):
 
 
 # Process stations
-# print("\nProcessing KKN")
-# st_kkn = preprocess(st_kkn, is_acceleration=False)
-
-# print("Processing EVN...")
-# st_evn = preprocess(st_evn, is_acceleration=False)
-
-# print("Processing KNSET...")
-# st_knset = preprocess(st_knset, is_acceleration=True)
 
 print("\nProcessing KKN")
 st_kkn = preprocess(st_kkn)
@@ -117,11 +104,11 @@ tr_kkn.trim(starttime=common_start, endtime=common_end)
 tr_evn.trim(starttime=common_start, endtime=common_end)
 tr_knset.trim(starttime=common_start, endtime=common_end)
 
-# Check sampling rates
-print("\nSampling rates:")
-print("KKN   :", tr_kkn.stats.sampling_rate)
-print("EVN   :", tr_evn.stats.sampling_rate)
-print("KNSET :", tr_knset.stats.sampling_rate)
+# # Check sampling rates
+# print("\nSampling rates:")
+# print("KKN   :", tr_kkn.stats.sampling_rate)
+# print("EVN   :", tr_evn.stats.sampling_rate)
+# print("KNSET :", tr_knset.stats.sampling_rate)
 
 
 # Hilbert envelope computation with optional smoothing
@@ -143,7 +130,6 @@ def get_hilbert_envelope(trace, smooth_cutoff=0.5):
         envelope = np.maximum(envelope, 0)
 
     return envelope
-
 
 # Calculate envelopes
 print("\nCalculating Hilbert envelopes")
@@ -214,7 +200,6 @@ def calculate_envelope_lag(
         lag_seconds
     )
 
-
 # Pairwise TDOA
 lag_kkn_evn, cc_kkn_evn, corr_kkn_evn, lags_kkn_evn = calculate_envelope_lag(
     env_kkn, env_evn, target_fs, max_shift_seconds
@@ -233,10 +218,14 @@ closure_error = lag_kkn_knset - (lag_kkn_evn + lag_evn_knset)
 
 # Print results
 print("\nHilbert Envelope TDOA results:")
-print(f"KKN -> EVN:   lag = {lag_kkn_evn:+.3f} s, CC = {cc_kkn_evn:.3f}")
-print(f"KKN -> KNSET: lag = {lag_kkn_knset:+.3f} s, CC = {cc_kkn_knset:.3f}")
-print(f"EVN -> KNSET: lag = {lag_evn_knset:+.3f} s, CC = {cc_evn_knset:.3f}")
+print(f"KKN - EVN:   lag = {lag_kkn_evn:+.3f} s, CC = {cc_kkn_evn:.3f}")
+print(f"KKN - KNSET: lag = {lag_kkn_knset:+.3f} s, CC = {cc_kkn_knset:.3f}")
+print(f"EVN - KNSET: lag = {lag_evn_knset:+.3f} s, CC = {cc_evn_knset:.3f}")
 print(f"\nTDOA closure error: {closure_error:+.3f} s")
+
+
+
+# Triangulation Part
 
 # Use KKN as the local coordinate origin
 origin_lat = stations["KKN"]["lat"]
@@ -253,11 +242,26 @@ def latlon_to_xy(lat, lon):
 
 station_xy = {name: latlon_to_xy(info["lat"], info["lon"]) for name, info in stations.items()}
 
+
+# TDOA - distance difference
 delta_kkn_evn = velocity * (-lag_kkn_evn)
 delta_kkn_knset = velocity * (-lag_kkn_knset)
 delta_evn_knset = velocity * (-lag_evn_knset)
 
-# Source Inversion (Least Squares)
+x_kkn, y_kkn = station_xy["KKN"]
+x_knset, y_knset = station_xy["KNSET"]
+
+station_distance = np.sqrt(
+    (x_knset - x_kkn) ** 2 +
+    (y_knset - y_kkn) ** 2
+)
+
+# print("\nKKN-KNSET geometry:")
+# print(f"Station separation: {station_distance:.3f} km")
+# print(f"Measured distance difference: {abs(delta_kkn_knset):.3f} km")
+# print(f"Difference: {station_distance - abs(delta_kkn_knset):.3f} km")
+
+# Least Squares method
 
 def tdoa_residuals(xy):
     x, y = xy
@@ -279,12 +283,12 @@ initial_guess = [0.0, 0.0]
 opt_res = least_squares(tdoa_residuals, initial_guess)
 x_src, y_src = opt_res.x
 
-print(f"Inverted Source Location:")
+print(f"Inverted Source Location using least square:")
 print(f"X (East) : {x_src:+.3f} km from KKN")
 print(f"Y (North): {y_src:+.3f} km from KKN")
 print(f"Residual norm: {opt_res.cost:.4f}")
 
-# Hyperbola intersection plot
+# Hyperbola intersection method
 
 # Get station coordinates
 x_kkn, y_kkn = station_xy["KKN"]
@@ -293,7 +297,7 @@ x_knset, y_knset = station_xy["KNSET"]
 
 
 # Create plotting region
-margin = 150.0
+margin = 500.0
 resolution = 0.5
 
 xmin = min(x_kkn, x_evn, x_knset) - margin
@@ -326,267 +330,59 @@ D_KNSET = np.sqrt(
 
 
 # Hyperbola equations
-#
-# H = 0 represents the hyperbola.
-#
-# KKN -> EVN
-# EVN arrives 23.950 s after KKN:
-#
-# d(EVN) - d(KKN) = velocity * 23.950
-#
-H_KKN_EVN = (
-    D_EVN
-    - D_KKN
-    - delta_kkn_evn
-)
 
+H_KKN_EVN = (D_EVN- D_KKN- delta_kkn_evn)
+H_KKN_KNSET = (D_KNSET- D_KKN- delta_kkn_knset)
+H_EVN_KNSET = (D_KNSET- D_EVN- delta_evn_knset)
 
-# KKN -> KNSET
-#
-# KNSET arrives 6.750 s after KKN:
-#
-# d(KNSET) - d(KKN) = velocity * 6.750
-#
-H_KKN_KNSET = (
-    D_KNSET
-    - D_KKN
-    - delta_kkn_knset
-)
+# print("KKN-KNSET hyperbola:")
+# print("Minimum H:", np.nanmin(H_KKN_KNSET))
+# print("Maximum H:", np.nanmax(H_KKN_KNSET))
 
+# Convert local source X,Y back to latitude/longitude
+geod = Geod(ellps="WGS84")
+source_distance = np.sqrt(x_src**2 + y_src**2)
+source_azimuth = np.degrees(np.arctan2(x_src, y_src))
+source_lon, source_lat, _ = geod.fwd(origin_lon,origin_lat,source_azimuth,source_distance * 1000.0)
 
-# EVN -> KNSET
-#
-# KNSET arrives 13.200 s before EVN:
-#
-# d(KNSET) - d(EVN) = velocity * (-13.200)
-#
-H_EVN_KNSET = (
-    D_KNSET
-    - D_EVN
-    - delta_evn_knset
-)
-
+print("\nLeast-squares source geographic location:")
+print(f"Latitude  : {source_lat:.6f}")
+print(f"Longitude : {source_lon:.6f}")
 
 # Plot hyperbolas
 plt.figure(figsize=(12, 10))
 
-plt.contour(
-    X,
-    Y,
-    H_KKN_EVN,
-    levels=[0],
-    colors="blue",
-    linewidths=2.5
-)
-
-plt.contour(
-    X,
-    Y,
-    H_KKN_KNSET,
-    levels=[0],
-    colors="red",
-    linewidths=2.5
-)
-
-plt.contour(
-    X,
-    Y,
-    H_EVN_KNSET,
-    levels=[0],
-    colors="green",
-    linewidths=2.5
-)
-
+plt.contour(X,Y,H_KKN_EVN,levels=[0],colors="blue",linewidths=2.5)
+plt.contour(X,Y,H_KKN_KNSET,levels=[0],colors="red",linewidths=2.5)
+plt.contour(X,Y,H_EVN_KNSET,levels=[0],colors="green",linewidths=2.5)
 
 # Plot stations
-plt.scatter(
-    x_kkn,
-    y_kkn,
-    marker="^",
-    s=160,
-    zorder=5
-)
-
-plt.scatter(
-    x_evn,
-    y_evn,
-    marker="^",
-    s=160,
-    zorder=5
-)
-
-plt.scatter(
-    x_knset,
-    y_knset,
-    marker="^",
-    s=160,
-    zorder=5
-)
-
+plt.scatter(x_kkn,y_kkn,marker=".",s=160,zorder=5)
+plt.scatter(x_evn,y_evn,marker=".",s=160,zorder=5)
+plt.scatter(x_knset,y_knset,marker=".",s=160,zorder=5)
 
 # Station labels
-plt.text(
-    x_kkn + 5,
-    y_kkn + 5,
-    "KKN",
-    fontsize=12,
-    fontweight="bold"
-)
-
-plt.text(
-    x_evn + 5,
-    y_evn + 5,
-    "EVN",
-    fontsize=12,
-    fontweight="bold"
-)
-
-plt.text(
-    x_knset + 5,
-    y_knset + 5,
-    "KNSET",
-    fontsize=12,
-    fontweight="bold"
-)
-
+plt.text(x_kkn + 5, y_kkn + 5,"KKN", fontsize=12, fontweight="bold")
+plt.text(x_evn + 5,y_evn + 5,"EVN",fontsize=12,fontweight="bold")
+plt.text( x_knset + 5, y_knset + 5, "KNSET", fontsize=12, fontweight="bold")
 
 # Plot least-squares source
-plt.scatter(
-    x_src,
-    y_src,
-    marker="*",
-    s=300,
-    zorder=10,
-    label="TDOA inverted source"
-)
-
+plt.scatter(x_src,y_src,marker="*",s=300,zorder=10,label="TDOA inverted source")
 
 # Legend
 legend_lines = [
-    Line2D(
-        [0],
-        [0],
-        color="blue",
-        linewidth=2.5,
-        label="KKN–EVN hyperbola"
-    ),
-    Line2D(
-        [0],
-        [0],
-        color="red",
-        linewidth=2.5,
-        label="KKN–KNSET hyperbola"
-    ),
-    Line2D(
-        [0],
-        [0],
-        color="green",
-        linewidth=2.5,
-        label="EVN–KNSET hyperbola"
-    ),
-    Line2D(
-        [0],
-        [0],
-        marker="^",
-        color="black",
-        linestyle="None",
-        markersize=10,
-        label="Station"
-    ),
-    Line2D(
-        [0],
-        [0],
-        marker="*",
-        color="black",
-        linestyle="None",
-        markersize=15,
-        label="Least-squares source"
-    )
+    Line2D([0],[0],color="blue",linewidth=2.5,label="KKN–EVN hyperbola"),
+    Line2D([0],[0],color="red",linewidth=2.5,label="KKN–KNSET hyperbola"),
+    Line2D([0],[0],color="green",linewidth=2.5,label="EVN–KNSET hyperbola"),
+    Line2D([0],[0],marker=".",color="black",linestyle="None",markersize=10,label="Station"),
+    Line2D([0],[0],marker="*",color="black",linestyle="None",markersize=15, label="Least-squares source")
 ]
 
-plt.legend(
-    handles=legend_lines,
-    loc="best"
-)
-
-
-plt.xlabel(
-    "East-West distance from KKN (km)"
-)
-
-plt.ylabel(
-    "North-South distance from KKN (km)"
-)
-
-plt.title(
-    "Three-Station TDOA Hyperbola Intersection\n"
-    f"Velocity = {velocity:.2f} km/s"
-)
-
+plt.legend(handles=legend_lines,loc="best")
+plt.xlabel( "East-West distance from KKN (km)")
+plt.ylabel("North-South distance from KKN (km)")
+plt.title("Three-Station TDOA Hyperbola Intersection\n"f"Velocity = {velocity:.2f} km/s")
 plt.grid(True)
-
 plt.axis("equal")
-
 plt.tight_layout()
-
 plt.show()
-
-# # Plot Hilbert envelopes
-# plt.figure(figsize=(12, 8))
-
-# plt.subplot(3, 1, 1)
-# plt.plot(tr_kkn.times(), env_kkn)
-# plt.ylabel("KKN")
-# plt.title("KKN Hilbert Envelope")
-# plt.grid()
-
-# plt.subplot(3, 1, 2)
-# plt.plot(tr_evn.times(), env_evn)
-# plt.ylabel("EVN")
-# plt.title("EVN Hilbert Envelope")
-# plt.grid()
-
-# plt.subplot(3, 1, 3)
-# plt.plot(tr_knset.times(), env_knset)
-# plt.ylabel("KNSET")
-# plt.xlabel("Time (seconds)")
-# plt.title("KNSET Hilbert Envelope")
-# plt.grid()
-
-# plt.suptitle("Hilbert Envelopes")
-# plt.tight_layout()
-# plt.show()
-
-# # Plot cross-correlations
-# plt.figure(figsize=(12, 8))
-
-# plt.subplot(3, 1, 1)
-# plt.plot(lags_kkn_evn, corr_kkn_evn)
-# plt.axvline(lag_kkn_evn, linestyle="--", label=f"Peak = {lag_kkn_evn:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"KKN -> EVN | Lag = {lag_kkn_evn:+.3f} s | CC = {cc_kkn_evn:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.subplot(3, 1, 2)
-# plt.plot(lags_kkn_knset, corr_kkn_knset)
-# plt.axvline(lag_kkn_knset, linestyle="--", label=f"Peak = {lag_kkn_knset:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"KKN -> KNSET | Lag = {lag_kkn_knset:+.3f} s | CC = {cc_kkn_knset:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.subplot(3, 1, 3)
-# plt.plot(lags_evn_knset, corr_evn_knset)
-# plt.axvline(lag_evn_knset, linestyle="--", label=f"Peak = {lag_evn_knset:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"EVN -> KNSET | Lag = {lag_evn_knset:+.3f} s | CC = {cc_evn_knset:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.suptitle("Pairwise Hilbert-Envelope Cross-Correlation")
-# plt.tight_layout()
-# plt.show()
