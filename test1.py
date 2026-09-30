@@ -11,24 +11,9 @@ from obspy.geodetics import gps2dist_azimuth
 client = Client("https://seiscomp.alertnepal.online")
 
 stations = [
-    {
-        "sta": "KKN",
-        "lat": 27.8000,
-        "lon": 85.2790,
-        "net": "NK",
-        "cha": "BHZ",
-        "loc": "*"
-    },
-        {
-        "sta": "EQM08",
-        "lat": 27.831,
-        "lon": 86.65,
-        "net": "NP",
-        "cha": "EHZ",
-        "loc": "*",
-    },
+    {"sta": "KKN", "lat": 27.8000,"lon": 85.2790,"net": "NK","cha": "BHZ","loc": "*"},
+    {"sta": "EQM08","lat": 27.831,"lon": 86.65,"net": "NP","cha": "EHZ","loc": "*",},
     {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
-
 ]
 
 start = UTCDateTime("2026-09-22T07:45:00")
@@ -42,162 +27,61 @@ fmax = 8.0
 P_VELOCITY = 6.5
 
 
-def waveform(station, start, end):
+def preprocess(station, start, end):
 
-    stream = client.get_waveforms(
-        network=station["net"],
-        station=station["sta"],
-        location=station["loc"],
-        channel=station["cha"],
-        starttime=start,
-        endtime=end
-    )
+    stream = client.get_waveforms(network=station["net"],station=station["sta"],location=station["loc"],channel=station["cha"],starttime=start,endtime=end)
 
     if len(stream) == 0:
         raise RuntimeError("No waveform found")
 
-    stream.merge(
-        method=1,
-        fill_value="interpolate"
-    )
-
+    stream.merge(method=1, fill_value="interpolate")
     stream.detrend("linear")
     stream.detrend("demean")
-
-    stream.taper(
-        max_percentage=0.05,
-        type="hann"
-    )
-
-    stream.filter(
-        "bandpass",
-        freqmin=fmin,
-        freqmax=fmax,
-        corners=4,
-        zerophase=True
-    )
-
-    stream.interpolate(
-        sampling_rate=fs,
-        method="linear"
-    )
-
+    stream.taper(max_percentage=0.05, type="hann")
+    stream.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
+    stream.interpolate(sampling_rate=fs, method="linear")
     return stream[0]
 
-
 def fetch_all_traces(stations, start, end):
-
     traces = {}
-
     for st_info in stations:
-
         name = f"{st_info['net']}.{st_info['sta']}"
-
         try:
-
-            tr = waveform(
-                st_info,
-                start,
-                end
-            )
-
+            tr = preprocess(st_info, start, end)
             traces[name] = tr
-
         except Exception as e:
-
-            print(
-                f"Skipping {name}: {e}"
-            )
-
+            print(f"Skipping {name}: {e}")
     return traces
-
 
 def waveform_plot(traces):
 
-    fig, axes = plt.subplots(
-        len(traces),
-        1,
-        figsize=(12, 8)
-    )
-
+    fig, axes = plt.subplots(len(traces),1,figsize=(12, 8))
     axes = np.atleast_1d(axes)
-
-    for ax, (name, trace) in zip(
-        axes,
-        traces.items()
-    ):
-
+    for ax, (name, trace) in zip(axes, traces.items()):
         data = trace.data.astype(float)
 
-        time = (
-            np.arange(len(data))
-            / trace.stats.sampling_rate
-        )
-
-        ax.plot(
-            time,
-            data,
-            linewidth=0.8
-        )
-
+        time = ( np.arange(len(data)) / trace.stats.sampling_rate)
+        ax.plot(time,data,linewidth=0.8)
         ax.set_ylabel(name)
-
         ax.grid(True)
 
-    axes[-1].set_xlabel(
-        "Time from start (s)"
-    )
-
+    axes[-1].set_xlabel("Time from start (s)")
     fig.tight_layout()
-
     plt.show()
 
-
 def spectogram(traces):
-
-    fig, axes = plt.subplots(
-        len(traces),
-        1,
-        figsize=(12, 8)
-    )
-
+    fig, axes = plt.subplots(len(traces),1,figsize=(12, 8))
     axes = np.atleast_1d(axes)
-
-    for ax, (name, trace) in zip(
-        axes,
-        traces.items()
-    ):
-
+    for ax, (name, trace) in zip(axes,traces.items()):
         data = trace.data.astype(float)
+        nperseg = min(512,len(data))
+        noverlap = int(nperseg * 0.75)
+        ax.specgram(data,NFFT=nperseg,Fs=trace.stats.sampling_rate,noverlap=noverlap)
 
-        nperseg = min(
-            512,
-            len(data)
-        )
-
-        noverlap = int(
-            nperseg * 0.75
-        )
-
-        ax.specgram(
-            data,
-            NFFT=nperseg,
-            Fs=trace.stats.sampling_rate,
-            noverlap=noverlap
-        )
-
-        ax.set_ylabel(
-            f"{name}\nFrequency (Hz)"
-        )
-
+        ax.set_ylabel(f"{name}\nFrequency (Hz)")
         ax.grid(True)
-
-    axes[-1].set_xlabel(
-        "Time (s)"
-    )
-
+    axes[-1].set_xlabel("Time (s)")
     plt.tight_layout()
-
     plt.show()
 
 
@@ -215,31 +99,13 @@ def pick_p(
     nsta = int(sta * fs)
     nlta = int(lta * fs)
 
-    cft = classic_sta_lta(
-        trace.data,
-        nsta,
-        nlta
-    )
-
+    cft = classic_sta_lta(trace.data,nsta,nlta)
     if skip is None:
+        skip = (lta+ 0.05 * len(trace.data) / fs)
+    cft[:int(skip * fs)] = 0
 
-        skip = (
-            lta
-            + 0.05 * len(trace.data) / fs
-        )
-
-    cft[
-        :int(skip * fs)
-    ] = 0
-
-    onsets = trigger_onset(
-        cft,
-        on,
-        off
-    )
-
+    onsets = trigger_onset(cft,on,off)
     if len(onsets) == 0:
-
         return None, cft
 
     best = max(
@@ -248,10 +114,7 @@ def pick_p(
         cft[o[0]:o[1] + 1].max()
     )
 
-    return (
-        best[0] / fs,
-        cft
-    )
+    return (best[0] / fs,cft )
 
 
 def pick_s(

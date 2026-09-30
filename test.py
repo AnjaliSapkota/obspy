@@ -7,23 +7,9 @@ import numpy as np
 client = Client("https://seiscomp.alertnepal.online")
 
 stations = [
-    {
-        "sta": "KKN",
-        "lat": 27.8000,
-        "lon": 85.2790,
-        "net": "NK",
-        "cha": "BHZ",
-        "loc": "*",
-    },
+    {"sta": "KKN", "lat": 27.8000,"lon": 85.2790,"net": "NK","cha": "BHZ","loc": "*"},
+    {"sta": "EQM08","lat": 27.831,"lon": 86.65,"net": "NP","cha": "EHZ","loc": "*",},
     {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
-    {
-        "sta": "EQM08",
-        "lat": 27.831,
-        "lon": 86.65,
-        "net": "NP",
-        "cha": "EHZ",
-        "loc": "*",
-    },
 ]
 
 start = UTCDateTime("2026-09-22T07:45:00")
@@ -32,25 +18,17 @@ end = UTCDateTime("2026-09-22T07:55:00")
 fs = 20.0
 fmin = 1.0
 fmax = 8.0
-warmup_sec = 30.0  # Warm-up padding to absorb LTA initialization artifacts
+warmup_sec = 30.0
 
-# ---------------- Settings ----------------
 VP, VS = 6.0, 3.5  # km/s, crustal average
-K = VP * VS / (VP - VS)  # S-P distance factor (~8.4 km/s)
+K = VP * VS / (VP - VS)
 MIN_SP, MAX_SP = 0.5, 45.0  # S search window after P (s)
 R_EARTH = 6371.0
 
 
 def preprocess(station, start, end):
     padded_start = start - warmup_sec
-    stream = client.get_waveforms(
-        network=station["net"],
-        station=station["sta"],
-        location=station["loc"],
-        channel=station["cha"],
-        starttime=padded_start,
-        endtime=end,
-    )
+    stream = client.get_waveforms(network=station["net"],station=station["sta"],location=station["loc"],channel=station["cha"],starttime=start,endtime=end)
 
     if len(stream) == 0:
         raise RuntimeError(f"No waveform found for {station['sta']}")
@@ -62,7 +40,6 @@ def preprocess(station, start, end):
     stream.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
     stream.interpolate(sampling_rate=fs, method="linear")
     return stream[0]
-
 
 def fetch_all_traces(stations, start, end):
     traces = {}
