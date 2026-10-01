@@ -1,190 +1,156 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from scipy.signal import spectrogram
 
-# Initialize FDSN client
 client = Client("https://seiscomp.alertnepal.online")
 
-start = UTCDateTime("2026-08-26T02:00:00")
-end   = UTCDateTime("2026-08-26T04:00:00")
-event_time = UTCDateTime("2026-08-26T02:52:00")
+start = UTCDateTime("2026-09-22T07:45:00")
+end   = UTCDateTime("2026-09-22T07:55:00")
 
 kkn = client.get_waveforms("NK", "KKN", "*", "BHZ", start, end)
 evn = client.get_waveforms("IO", "EVN", "*", "BHZ", start, end)
+eqm08 = client.get_waveforms("NP", "EQM08", "*", "EHZ", start, end)
+eqm10 = client.get_waveforms("NP", "EQM10", "*", "EHZ", start, end)
 
-# kkn_inv = client.get_stations(network="NK", station="KKN", location="*", channel="BHZ", level="response")
-# evn_inv = client.get_stations(network="IO", station="EVN", location="*", channel="BHZ", level="response")
+# Store all stations together
+streams = {"KKN": kkn,"EVN": evn,"EQM08": eqm08,"EQM10": eqm10}
 
-# pre_filt = (0.005, 0.006, 30.0, 35.0)
-# kkn.remove_response(inventory=kkn_inv, output='DISP', pre_filt=pre_filt)
-# evn.remove_response(inventory=evn_inv, output='DISP', pre_filt=pre_filt)
+# Preprocess all stations
+for name, st in streams.items():
+    st.merge(method=1, fill_value="interpolate")
+    st.detrend("demean")
+    st.detrend("linear")
+    st.taper(max_percentage=0.05,type="cosine")
+    st.interpolate(sampling_rate=20, method="linear")
+traces = {"KKN": kkn[0],"EVN": evn[0],"EQM08": eqm08[0],"EQM10": eqm10[0]}
 
-# for inv, name in [(kkn_inv, "KKN"), (evn_inv, "EVN")]:
-#     print(f"\n{name}")
-#     print(inv)
+# Get data and sampling rates
+data = {}
+sampling_rates = {}
 
-#     for network in inv:
-#         for station in network:
-#             for channel in station:
-#                 print(
-#                     f"{channel.code}: "
-#                     f"response = {channel.response}"
-#                 )
+for name, tr in traces.items():
+    data[name] = tr.data.astype(float)
+    sampling_rates[name] = tr.stats.sampling_rate
+    print(f"{name}: "f"{tr.id}, "f"Fs={tr.stats.sampling_rate} Hz, "f"Samples={len(tr.data)}")
 
-#                 if channel.response:
-#                     print(
-#                         "Number of response stages:",
-#                         len(channel.response.response_stages)
-#                     )
+# waveform
+fig_wave, axes_wave = plt.subplots(4,1,figsize=(15, 12),sharex=True)
+station_order = ["KKN", "EVN", "EQM08", "EQM10"]
+for ax, name in zip(axes_wave, station_order):
+    tr = traces[name]
+    ax.plot(tr.times("matplotlib"),data[name],linewidth=0.5)
 
-# Merge gaps & Preprocess before response removal
-kkn.merge(method=1, fill_value="interpolate")
-evn.merge(method=1, fill_value="interpolate")
+    ax.set_title(f"{tr.id}")
+    ax.set_ylabel("Amplitude")
+    ax.grid(True,alpha=0.3)
 
-kkn.detrend("demean").detrend("linear").taper(max_percentage=0.05, type="cosine")
-evn.detrend("demean").detrend("linear").taper(max_percentage=0.05, type="cosine")
+axes_wave[-1].set_xlabel("UTC Time")
 
-# # #  Remove Instrument Response (Converts raw ADC counts to Ground Velocity in m/s)
-# # pre_filt = (0.005, 0.01, 10.0, 20.0)
-# # # Try full stage response removal first; fall back to simple sensitivity division
-# # try:
-# #     kkn.remove_response(inventory=kkn_inv, output="VEL", pre_filt=pre_filt, water_level=60)
-# # except IndexError:
-# #     print("Full response stages missing for KKN, falling back to sensitivity division...")
-# #     kkn.remove_sensitivity(inventory=kkn_inv)
+# Format time
+axes_wave[-1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
 
-# # try:
-# #     evn.remove_response(inventory=evn_inv, output="VEL", pre_filt=pre_filt, water_level=60)
-# # except IndexError:
-# #     print("Full response stages missing for EVN, falling back to sensitivity division...")
-# #     evn.remove_sensitivity(inventory=evn_inv)
+axes_wave[0].set_xlim(start.matplotlib_date,end.matplotlib_date)
 
-kkn_trace = kkn[0]
-evn_trace = evn[0]
+fig_wave.suptitle("Seismic Waveforms - 22 September 2026",fontsize=15,fontweight="bold")
 
-kkn_data = kkn_trace.data.astype(float)
-evn_data = evn_trace.data.astype(float)
+plt.tight_layout()
+plt.show()
 
-kkn_fs = kkn_trace.stats.sampling_rate
-evn_fs = evn_trace.stats.sampling_rate
 
-# 5. Compute Spectrograms
-kkn_nperseg = int(20 * kkn_fs)
-evn_nperseg = int(20 * evn_fs)
+# Spectogram
 
-kkn_freq, kkn_time, kkn_Sxx = spectrogram(
-    kkn_data,
-    fs=kkn_fs,
-    nperseg=kkn_nperseg,
-    noverlap=kkn_nperseg // 2
+fig_spec, axes_spec = plt.subplots(4,1,figsize=(15, 14),
+    sharex=True
 )
 
-evn_freq, evn_time, evn_Sxx = spectrogram(
-    evn_data,
-    fs=evn_fs,
-    nperseg=evn_nperseg,
-    noverlap=evn_nperseg // 2
-)
+for ax, name in zip(axes_spec, station_order):
 
-# Convert PSD to dB relative to 1 (m/s)^2 / Hz
-kkn_Sxx_db = 10 * np.log10(kkn_Sxx + 1e-20)
-evn_Sxx_db = 10 * np.log10(evn_Sxx + 1e-20)
+    tr = traces[name]
 
-start_matdate = start.matplotlib_date
-kkn_spec_times = start_matdate + (kkn_time / 86400.0)
-evn_spec_times = start_matdate + (evn_time / 86400.0)
+    signal = data[name]
+    fs = sampling_rates[name]
 
-# 6. Plotting - 4 Vertical Subplots
-fig, axes = plt.subplots(4, 1, figsize=(15, 14), sharex=True)
+    # 20-second spectrogram window
+    nperseg = int(20 * fs)
 
-# --- 1. KKN WAVEFORM ---
-axes[0].plot(
-    kkn_trace.times("matplotlib"),
-    kkn_data,
-    linewidth=0.6,
-    color="tab:orange"
-)
-axes[0].set_title("NK.KKN.BHZ — Waveform")
-axes[0].set_ylabel("Velocity (m/s)")
-axes[0].grid(True, alpha=0.3)
-
-# --- 2. EVN WAVEFORM ---
-axes[1].plot(
-    evn_trace.times("matplotlib"),
-    evn_data,
-    linewidth=0.6,
-    color="tab:blue"
-)
-axes[1].set_title("IO.EVN.BHZ — Waveform")
-axes[1].set_ylabel("Velocity (m/s)")
-axes[1].grid(True, alpha=0.3)
-
-# --- 3. KKN SPECTROGRAM ---
-pcm1 = axes[2].pcolormesh(
-    kkn_spec_times,
-    kkn_freq,
-    kkn_Sxx_db,
-    shading="gouraud",
-    cmap="viridis"
-)
-axes[2].set_ylim(0, 10)
-axes[2].set_title("NK.KKN.BHZ — Spectrogram")
-axes[2].set_ylabel("Frequency (Hz)")
-
-# --- 4. EVN SPECTROGRAM ---
-pcm2 = axes[3].pcolormesh(
-    evn_spec_times,
-    evn_freq,
-    evn_Sxx_db,
-    shading="gouraud",
-    cmap="viridis"
-)
-axes[3].set_ylim(0, 10)
-axes[3].set_title("IO.EVN.BHZ — Spectrogram")
-axes[3].set_ylabel("Frequency (Hz)")
-axes[3].set_xlabel("UTC Time")
-
-# --- Event Marker Line across all axes ---
-for ax in axes:
-    ax.axvline(
-        event_time.matplotlib_date,
-        color="red",
-        linestyle="--",
-        linewidth=1.2,
-        alpha=0.8,
-        label="02:52 UTC Event"
+    # Make sure nperseg is not larger than signal
+    nperseg = min(
+        nperseg,
+        len(signal)
     )
 
-# --- Align Subplot Widths using colorbar dummies ---
-divider2 = make_axes_locatable(axes[2])
-cax1 = divider2.append_axes("right", size="1.5%", pad=0.1)
-fig.colorbar(pcm1, cax=cax1, label="Power [dB rel. (m/s)²/Hz]")
+    freq, time, Sxx = spectrogram(
+        signal,
+        fs=fs,
+        nperseg=nperseg,
+        noverlap=nperseg // 2
+    )
 
-divider3 = make_axes_locatable(axes[3])
-cax2 = divider3.append_axes("right", size="1.5%", pad=0.1)
-fig.colorbar(pcm2, cax=cax2, label="Power [dB rel. (m/s)²/Hz]")
+    # Convert PSD to dB
+    Sxx_db = 10 * np.log10(
+        Sxx + 1e-20
+    )
 
-# Dummy colorbars for the top two axes to ensure identical plot area widths
-for ax_idx in [0, 1]:
-    divider = make_axes_locatable(axes[ax_idx])
-    cax_dummy = divider.append_axes("right", size="1.5%", pad=0.1)
-    cax_dummy.axis("off")
+    # Convert relative seconds to matplotlib dates
+    spec_times = (
+        start.matplotlib_date
+        + time / 86400.0
+    )
 
-# Set bounds & formatting
-axes[0].set_xlim(start.matplotlib_date, end.matplotlib_date)
-axes[3].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-fig.autofmt_xdate()
+    pcm = ax.pcolormesh(
+        spec_times,
+        freq,
+        Sxx_db,
+        shading="gouraud",
+        cmap="viridis"
+    )
 
-fig.suptitle(
-    "KKN and EVN Ground Motion (m/s) + Spectrograms Around 02:52 UTC",
-    fontsize=14,
-    fontweight="bold",
-    y=0.98
+    # Display 0–10 Hz
+    ax.set_ylim(
+        0,
+        10
+    )
+
+    ax.set_title(
+        f"{tr.id}"
+    )
+
+    ax.set_ylabel(
+        "Frequency (Hz)"
+    )
+
+    # Colorbar for each station
+    cbar = fig_spec.colorbar(
+        pcm,
+        ax=ax,
+        pad=0.01
+    )
+
+    cbar.set_label(
+        "Power [dB]"
+    )
+
+axes_spec[-1].set_xlabel(
+    "UTC Time"
+)
+
+axes_spec[-1].xaxis.set_major_formatter(
+    mdates.DateFormatter("%H:%M:%S")
+)
+
+axes_spec[0].set_xlim(
+    start.matplotlib_date,
+    end.matplotlib_date
+)
+
+fig_spec.suptitle(
+    "Seismic Spectrograms — 22 September 2026",
+    fontsize=15,
+    fontweight="bold"
 )
 
 plt.tight_layout()
