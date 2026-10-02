@@ -9,34 +9,47 @@ import numpy as np
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
-from scipy.optimize import least_squares
 from scipy.stats import kurtosis
 
 
-def get_three_components(client, station, start, end, fs, fmin, fmax, warmup_sec):
+def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
     st = client.get_waveforms(
         network=station["net"],
         station=station["sta"],
         location=station["loc"],
         channel=station["cha"][:2] + "?",
-        starttime=start - warmup_sec,
+        starttime=start - wait_sec,
         endtime=end,
     )
 
     if len(st) == 0:
         raise RuntimeError(f"No waveforms found for {station['sta']}")
 
+    zs = st.select(component="Z")
+    if len(zs) == 0:
+        raise RuntimeError("Vertical component missing")
+
+    # prefer the band/instrument code the user typed (e.g. "BH"), else take the first Z found
+    wanted = station["cha"][:2]
+    z_ref = next((t for t in zs if t.stats.channel[:2] == wanted), zs[0])
+    loc_ref = z_ref.stats.location
+    band_ref = z_ref.stats.channel[:2]
+
+    # keep one location and one band/instrument code only
+    st = st.select(location=loc_ref, channel=band_ref + "?")
+
+    # one Z + two horizontals (N/E preferred, otherwise 1/2)
+    horiz = st.select(component="N") + st.select(component="E")
+
+    if len(horiz) < 2:
+        raise RuntimeError(f"Need two horizontal components for S-picking ({band_ref}*)")
+    st = st.select(component="Z") + horiz
+
     st.merge(method=1, fill_value="interpolate")
     st.detrend("linear")
     st.detrend("demean")
     st.taper(max_percentage=0.05, type="hann")
-    st.filter(
-        "bandpass",
-        freqmin=fmin,
-        freqmax=fmax,
-        corners=4,
-        zerophase=True,
-    )
+    st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True,)
     st.interpolate(sampling_rate=fs, method="linear")
 
     t0 = max(tr.stats.starttime for tr in st)
@@ -71,7 +84,7 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, warmup_sec
 
 
 def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.0):
-    """Refine an approximate arrival using the AIC picker."""
+    # Refine an approximate arrival using the AIC picker
     n = len(trace_data)
 
     i0 = max(1, approximate_idx - int(search_before * fs))
@@ -103,20 +116,9 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.
     return int(refined_idx)
 
 
-def pick_p(
-    z,
-    fs,
-    start,
-    sta=1.0,
-    lta=10.0,
-    thr_on=3.5,
-    thr_off=1.5,
-    aic_before=2.0,
-    aic_after=4.0,
-):
-    """Detect P using STA/LTA and refine the trigger using AIC."""
-    nsta = max(1, int(sta * fs))
-    nlta = max(nsta + 1, int(lta * fs))
+def pick_p(z,fs,start,sta=1.0,lta=10.0,thr_on=3.5,thr_off=1.5,aic_before=2.0,aic_after=4.0,):
+    nsta = int(sta * fs)
+    nlta = int(lta * fs)
 
     cft = recursive_sta_lta(z.data, nsta, nlta)
     p_idx = None
@@ -484,21 +486,7 @@ def _fig_to_png_b64(fig):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def waveform_stalta_png(
-    name,
-    z,
-    env,
-    cft_p,
-    cft_s,
-    tp,
-    ts,
-    p_sta,
-    s_sta,
-    thr_on,
-    thr_off,
-    thr_on_s,
-    thr_off_s,
-):
+def waveform_stalta_png(name,z,env,cft_p,cft_s,tp,ts,p_sta,s_sta,thr_on,thr_off,thr_on_s,thr_off_s,):
     t = z.times("matplotlib")
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
@@ -553,7 +541,7 @@ def waveform_stalta_png(
     else:
         xlim = (
             (tp - 5).matplotlib_date,
-            (tp + 20).matplotlib_date,
+            (tp + 60).matplotlib_date,
         )
 
     for ax in axes:
@@ -613,7 +601,7 @@ def run_location(
     fs=20.0,
     fmin=1.0,
     fmax=8.0,
-    warmup_sec=30.0,
+    wait_sec=30.0,
     vp=6.0,
     vs=3.5,
     sta_p=1.0,
@@ -626,7 +614,6 @@ def run_location(
     max_sp_sec=50.0,
     thr_on_s=2.5,
     thr_off_s=1.0,
-    max_station_rms_km=20.0,
 ):
     client = Client(base_url)
     k = vp * vs / (vp - vs)
@@ -644,26 +631,8 @@ def run_location(
         }
 
         try:
-            z, env = get_three_components(
-                client,
-                station,
-                start,
-                end,
-                fs,
-                fmin,
-                fmax,
-                warmup_sec,
-            )
-
-            tp, cft_p, p_sta_time, p_trigger = pick_p(
-                z,
-                fs,
-                start,
-                sta_p,
-                lta_p,
-                thr_on,
-                thr_off,
-            )
+            z, env = get_three_components(client,station,start,end,fs,fmin,fmax,wait_sec,)
+            tp, cft_p, p_sta_time, p_trigger = pick_p(z,fs,start,sta_p,lta_p,thr_on,thr_off,)
 
             if tp is None:
                 entry["error"] = "No P trigger found"
@@ -671,37 +640,23 @@ def run_location(
                 station_results.append(entry)
                 continue
 
-            ts, cft_s, s_sta_time, s_trigger = pick_s(
-                env,
-                fs,
-                z.stats.starttime,
-                tp,
-                sta_s,
-                lta_s,
-                min_sp_sec,
-                max_sp_sec,
-                thr_on_s,
-                thr_off_s,
-            )
+            ts, cft_s, s_sta_time, s_trigger = pick_s(env,fs,z.stats.starttime,tp,sta_s,lta_s,min_sp_sec,max_sp_sec,thr_on_s,thr_off_s,)
 
             if ts is None:
-                entry["error"] = "No S trigger found in window"
+                entry["error"] = f"No S trigger found in window (P at {tp.isoformat()[11:23]})"
                 entry["quality"] = "REJECT"
+                entry["waveform_png"] = waveform_stalta_png(
+                    name, z, env, cft_p, cft_s, tp, None,
+                    p_sta_time, None, thr_on, thr_off, thr_on_s, thr_off_s,
+                )
+                entry["spectrogram_png"] = spectrogram_png(name, z)
                 station_results.append(entry)
                 continue
 
             sp_diff = float(ts - tp)
             dist_km = float(sp_diff * k)
 
-            q_info = calculate_quality_metrics(
-                z,
-                env,
-                fs,
-                tp,
-                ts,
-                p_trigger,
-                s_trigger,
-            )
+            q_info = calculate_quality_metrics(z,env,fs,tp,ts,p_trigger,s_trigger,)
 
             entry.update(
                 {

@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, render_template_string, request
 from obspy import UTCDateTime
+from obspy.clients.fdsn import Client
 
 import test3 as core
 
@@ -12,20 +13,64 @@ DEFAULT_STATIONS = [
     {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
 ]
 
+_coord_cache = {}
+
+
+def lookup_station(base_url, net, sta):
+    """Return (lat, lon, elevation) for a station from the FDSN server."""
+    key = (base_url, net, sta)
+    if key not in _coord_cache:
+        inv = Client(base_url).get_stations(network=net, station=sta, level="station")
+        found = None
+        for network in inv:
+            for station in network:
+                found = (station.latitude, station.longitude, station.elevation)
+                break
+            if found:
+                break
+        if not found:
+            raise ValueError(f"Station {net}.{sta} not found on {base_url}")
+        _coord_cache[key] = found
+    return _coord_cache[key]
+
+
+@app.route("/api/station")
+def station_lookup():
+    net = request.args.get("net", "").strip()
+    sta = request.args.get("sta", "").strip()
+    base_url = request.args.get("base_url") or DEFAULT_BASE_URL
+    if not net or not sta:
+        return jsonify(error="Network and station codes are required."), 400
+    try:
+        lat, lon, elev = lookup_station(base_url, net, sta)
+        return jsonify(net=net, sta=sta, lat=lat, lon=lon, elevation=elev)
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    except Exception as e:
+        # obspy raises FDSNNoDataException (204) when nothing matches
+        return jsonify(error=f"No coordinates found for {net}.{sta} ({type(e).__name__})"), 404
+
 
 @app.route("/api/run", methods=["POST"])
 def run():
     try:
         p = request.get_json()
+        base_url = p.get("base_url") or DEFAULT_BASE_URL
+
+        # fill in any station that still has no coordinates
+        for s in p["stations"]:
+            if s.get("lat") in (None, "") or s.get("lon") in (None, ""):
+                s["lat"], s["lon"], _ = lookup_station(base_url, s["net"], s["sta"])
+
         result = core.run_location(
-            base_url=p.get("base_url") or DEFAULT_BASE_URL,
+            base_url=base_url,
             stations=p["stations"],
             start=UTCDateTime(p["start"]),
             end=UTCDateTime(p["end"]),
             fs=float(p["fs"]),
             fmin=float(p["fmin"]),
             fmax=float(p["fmax"]),
-            warmup_sec=float(p["warmup_sec"]),
+            wait_sec=float(p["wait_sec"]),
             vp=float(p["vp"]),
             vs=float(p["vs"]),
             sta_p=float(p["sta_p"]),
@@ -51,7 +96,6 @@ def index():
     return render_template_string(PAGE, stations=DEFAULT_STATIONS, base_url=DEFAULT_BASE_URL)
 
 
-# ------------------------------------------------------------------ frontend
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -120,7 +164,7 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
   <div class="row"><div><label>Band low (Hz)</label><input type="number" id="fmin" value="1.0" step="0.1"></div>
   <div><label>Band high (Hz)</label><input type="number" id="fmax" value="8" step="0.1"></div></div>
   <div class="row"><div><label>Sample rate (Hz)</label><input type="number" id="fs" value="20" step="1"></div>
-  <div><label>Warm-up (s)</label><input type="number" id="warmup_sec" value="30" step="5"></div></div>
+  <div><label>Wait (s)</label><input type="number" id="wait_sec" value="30" step="5"></div></div>
   <div class="row"><div><label>Vp (km/s)</label><input type="number" id="vp" value="6.0" step="0.1"></div>
   <div><label>Vs (km/s)</label><input type="number" id="vs" value="3.5" step="0.1"></div></div>
 
@@ -165,21 +209,40 @@ function drawStations(){
       <button class="rm" onclick="removeStation(${i})" title="Remove">\u00d7</button>
       <div class="name">Station ${i+1}</div>
       <div class="row3">
-        <input type="text" value="${s.sta}" onchange="stations[${i}].sta=this.value" placeholder="STA">
-        <input type="text" value="${s.net}" onchange="stations[${i}].net=this.value" placeholder="NET">
+        <input type="text" value="${s.sta}" onchange="stations[${i}].sta=this.value.trim().toUpperCase();lookup(${i})" placeholder="STA">
+        <input type="text" value="${s.net}" onchange="stations[${i}].net=this.value.trim().toUpperCase();lookup(${i})" placeholder="NET">
         <input type="text" value="${s.loc}" onchange="stations[${i}].loc=this.value" placeholder="LOC">
       </div>
       <div class="row3" style="margin-top:6px">
         <input type="text" value="${s.cha}" onchange="stations[${i}].cha=this.value" placeholder="CHA">
-        <input type="number" step="0.0001" value="${s.lat}" onchange="stations[${i}].lat=parseFloat(this.value)" placeholder="lat">
-        <input type="number" step="0.0001" value="${s.lon}" onchange="stations[${i}].lon=parseFloat(this.value)" placeholder="lon">
+        <input type="number" step="0.0001" value="${s.lat ?? ''}" onchange="stations[${i}].lat=parseFloat(this.value)" placeholder="lat (auto)">
+        <input type="number" step="0.0001" value="${s.lon ?? ''}" onchange="stations[${i}].lon=parseFloat(this.value)" placeholder="lon (auto)">
       </div>
     </div>`).join('');
 }
 drawStations();
 
+async function lookup(i){
+  const s = stations[i];
+  if(!s.sta || !s.net) return;
+  setStatus(`Looking up ${s.net}.${s.sta}\u2026`);
+  try{
+    const q = new URLSearchParams({net:s.net, sta:s.sta, base_url:v('base_url')});
+    const r = await fetch('/api/station?' + q);
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error);
+    s.lat = d.lat; s.lon = d.lon;
+    drawStations();
+    setStatus(`${s.net}.${s.sta}: ${d.lat.toFixed(4)}, ${d.lon.toFixed(4)}`);
+  }catch(e){
+    s.lat = null; s.lon = null;
+    drawStations();
+    setStatus(e.message, true);
+  }
+}
+
 function addStation(){
-  stations.push({sta:"", net:"NP", loc:"*", cha:"EHZ", lat:27.7, lon:85.3});
+  stations.push({sta:"", net:"", loc:"*", cha:"EHZ", lat:null, lon:null});
   drawStations();
 }
 function removeStation(i){
@@ -191,12 +254,14 @@ const v = id => document.getElementById(id).value;
 
 async function run(){
   const btn = document.getElementById('go'); btn.disabled = true;
+  const bad = stations.findIndex(s => !s.sta || !s.net || !Number.isFinite(s.lat) || !Number.isFinite(s.lon));
+  if(bad >= 0){ setStatus(`Station ${bad+1} is missing a code or coordinates.`, true); btn.disabled = false; return; }
   setStatus('Downloading waveforms and processing. This can take a minute.');
   try{
     const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         base_url:v('base_url'), stations, start:v('start'), end:v('end'),
-        fmin:v('fmin'), fmax:v('fmax'), fs:v('fs'), warmup_sec:v('warmup_sec'),
+        fmin:v('fmin'), fmax:v('fmax'), fs:v('fs'), wait_sec:v('wait_sec'),
         vp:v('vp'), vs:v('vs'),
         sta_p:v('sta_p'), lta_p:v('lta_p'), thr_on:v('thr_on'), thr_off:v('thr_off'),
         sta_s:v('sta_s'), lta_s:v('lta_s'), min_sp_sec:v('min_sp_sec'), max_sp_sec:v('max_sp_sec'),
