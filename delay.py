@@ -6,7 +6,7 @@ from obspy.clients.fdsn import Client
 from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows
 
 # FDSN client
-client = Client("EARTHSCOPE")
+client = Client("https://seiscomp.alertnepal.online")
 
 # Time window
 start = UTCDateTime("2026-08-26T02:52:00")
@@ -19,61 +19,29 @@ freqmax = 8.0
 max_shift_seconds = 30.0
 
 # Fetch waveforms
-print("Fetching waveforms...")
+print("Fetching waveforms")
 
 st_kkn = client.get_waveforms(network="NK",station="KKN",location="*",channel="BHZ",starttime=start,endtime=end)
 
 st_evn = client.get_waveforms(network="IO",station="EVN",location="*",channel="BHZ",starttime=start,endtime=end)
 
-st_knset = client.get_waveforms(network="NQ",station="KNSET",location="01",channel="HNZ",starttime=start,endtime=end)
+st_eqm10 = client.get_waveforms(network="NP",station="EQM10",location="*",channel="EHZ",starttime=start,endtime=end)
 
 # Preprocess function
 def preprocess(stream, is_acceleration=False):
     stream = stream.copy()
 
-    # Merge segments
     stream.merge(method=1,fill_value="interpolate")
-    # Remove trend and mean
     stream.detrend("linear")
     stream.detrend("demean")
-
-    # Taper edges
     stream.taper(max_percentage=0.05,type="hann")
-
-    # # Convert acceleration (m/s^2) to velocity (m/s) if needed
-    # if is_acceleration:
-    #     stream.integrate(method="cumtrapz")
-    #     # High-pass filter immediately after to suppress integration drift
-    #     stream.filter("highpass", freq=0.1)
-    #     stream.detrend("linear")
-
-    # Interpolate to common target sampling rate
     stream.interpolate(sampling_rate=target_fs,method="linear")
-
-    # Bandpass filter
     stream.filter("bandpass",freqmin=freqmin,freqmax=freqmax,corners=4,zerophase=True)
-
     return stream
 
-
-# Process stations
-# print("\nProcessing KKN")
-# st_kkn = preprocess(st_kkn, is_acceleration=False)
-
-# print("Processing EVN")
-# st_evn = preprocess(st_evn, is_acceleration=False)
-
-# print("Processing KNSET")
-# st_knset = preprocess(st_knset, is_acceleration=True)
-
-print("\nProcessing KKN")
 st_kkn = preprocess(st_kkn)
-
-print("Processing EVN")
 st_evn = preprocess(st_evn)
-
-print("Processing KNSET")
-st_knset = preprocess(st_knset)
+st_eqm10 = preprocess(st_eqm10)
 
 # Check traces
 if len(st_kkn) == 0:
@@ -82,60 +50,54 @@ if len(st_kkn) == 0:
 if len(st_evn) == 0:
     raise RuntimeError("No processed EVN waveform found.")
 
-if len(st_knset) == 0:
-    raise RuntimeError("No processed KNSET waveform found.")
+if len(st_eqm10) == 0:
+    raise RuntimeError("No processed eqm10 waveform found.")
 
 # Get first trace
 tr_kkn = st_kkn[0]
 tr_evn = st_evn[0]
-tr_knset = st_knset[0]
+tr_eqm10 = st_eqm10[0]
 
-# Print information
-print("\nProcessed traces:")
-print("\nKKN\n", tr_kkn)
-print("\nEVN\n", tr_evn)
-print("\nKNSET\n", tr_knset)
+# # Print information
+# print("\nProcessed traces:")
+# print("\nKKN\n", tr_kkn)
+# print("\nEVN\n", tr_evn)
+# print("\neqm10\n", tr_eqm10)
 
 # Find common time window
 common_start = max(
     tr_kkn.stats.starttime,
     tr_evn.stats.starttime,
-    tr_knset.stats.starttime
+    tr_eqm10.stats.starttime
 )
 
 common_end = min(
     tr_kkn.stats.endtime,
     tr_evn.stats.endtime,
-    tr_knset.stats.endtime
+    tr_eqm10.stats.endtime
 )
 
-print("\nCommon time window:")
-print("Start:", common_start)
-print("End  :", common_end)
+# print("\nCommon time window:")
+# print("Start:", common_start)
+# print("End  :", common_end)
 
 # Trim to common window
 tr_kkn.trim(starttime=common_start, endtime=common_end)
 tr_evn.trim(starttime=common_start, endtime=common_end)
-tr_knset.trim(starttime=common_start, endtime=common_end)
+tr_eqm10.trim(starttime=common_start, endtime=common_end)
 
-# Check sampling rates
-print("\nSampling rates:")
-print("KKN   :", tr_kkn.stats.sampling_rate)
-print("EVN   :", tr_evn.stats.sampling_rate)
-print("KNSET :", tr_knset.stats.sampling_rate)
+# # Check sampling rates
+# print("\nSampling rates:")
+# print("KKN   :", tr_kkn.stats.sampling_rate)
+# print("EVN   :", tr_evn.stats.sampling_rate)
+# print("eqm10 :", tr_eqm10.stats.sampling_rate)
 
 
 # Hilbert envelope computation with optional smoothing
 def get_hilbert_envelope(trace, smooth_cutoff=0.5):
     signal = trace.data.astype(float)
-
-    # Remove mean
     signal = signal - np.mean(signal)
-
-    # Hilbert transform
     analytic_signal = hilbert(signal)
-
-    # Envelope
     envelope = np.abs(analytic_signal)
 
     # Low-pass filter envelope to remove high-frequency noise spikes
@@ -149,11 +111,10 @@ def get_hilbert_envelope(trace, smooth_cutoff=0.5):
 
 
 # Calculate envelopes
-print("\nCalculating Hilbert envelopes...")
+print("\nCalculating Hilbert envelopes")
 env_kkn = get_hilbert_envelope(tr_kkn, smooth_cutoff=0.5)
 env_evn = get_hilbert_envelope(tr_evn, smooth_cutoff=0.5)
-env_knset = get_hilbert_envelope(tr_knset, smooth_cutoff=0.5)
-
+env_eqm10 = get_hilbert_envelope(tr_eqm10, smooth_cutoff=0.5)
 
 # Calculate envelope lag
 def calculate_envelope_lag(
@@ -223,80 +184,20 @@ lag_kkn_evn, cc_kkn_evn, corr_kkn_evn, lags_kkn_evn = calculate_envelope_lag(
     env_kkn, env_evn, target_fs, max_shift_seconds
 )
 
-lag_kkn_knset, cc_kkn_knset, corr_kkn_knset, lags_kkn_knset = calculate_envelope_lag(
-    env_kkn, env_knset, target_fs, max_shift_seconds
+lag_kkn_eqm10, cc_kkn_eqm10, corr_kkn_eqm10, lags_kkn_eqm10 = calculate_envelope_lag(
+    env_kkn, env_eqm10, target_fs, max_shift_seconds
 )
 
-lag_evn_knset, cc_evn_knset, corr_evn_knset, lags_evn_knset = calculate_envelope_lag(
-    env_evn, env_knset, target_fs, max_shift_seconds
+lag_evn_eqm10, cc_evn_eqm10, corr_evn_eqm10, lags_evn_eqm10 = calculate_envelope_lag(
+    env_evn, env_eqm10, target_fs, max_shift_seconds
 )
 
 # TDOA closure
-closure_error = lag_kkn_knset - (lag_kkn_evn + lag_evn_knset)
+closure_error = lag_kkn_eqm10 - (lag_kkn_evn + lag_evn_eqm10)
 
 # Print results
 print("\nHilbert Envelope TDOA results:")
-print(f"KKN -> EVN:   lag = {lag_kkn_evn:+.3f} s, CC = {cc_kkn_evn:.3f}")
-print(f"KKN -> KNSET: lag = {lag_kkn_knset:+.3f} s, CC = {cc_kkn_knset:.3f}")
-print(f"EVN -> KNSET: lag = {lag_evn_knset:+.3f} s, CC = {cc_evn_knset:.3f}")
+print(f"KKN - EVN:   lag = {lag_kkn_evn:+.3f} s, CC = {cc_kkn_evn:.3f}")
+print(f"KKN - eqm10: lag = {lag_kkn_eqm10:+.3f} s, CC = {cc_kkn_eqm10:.3f}")
+print(f"EVN - eqm10: lag = {lag_evn_eqm10:+.3f} s, CC = {cc_evn_eqm10:.3f}")
 print(f"\nTDOA closure error: {closure_error:+.3f} s")
-
-# # Plot Hilbert envelopes
-# plt.figure(figsize=(12, 8))
-
-# plt.subplot(3, 1, 1)
-# plt.plot(tr_kkn.times(), env_kkn)
-# plt.ylabel("KKN")
-# plt.title("KKN Hilbert Envelope")
-# plt.grid()
-
-# plt.subplot(3, 1, 2)
-# plt.plot(tr_evn.times(), env_evn)
-# plt.ylabel("EVN")
-# plt.title("EVN Hilbert Envelope")
-# plt.grid()
-
-# plt.subplot(3, 1, 3)
-# plt.plot(tr_knset.times(), env_knset)
-# plt.ylabel("KNSET")
-# plt.xlabel("Time (seconds)")
-# plt.title("KNSET Hilbert Envelope")
-# plt.grid()
-
-# plt.suptitle("Hilbert Envelopes")
-# plt.tight_layout()
-# plt.show()
-
-# # Plot cross-correlations
-# plt.figure(figsize=(12, 8))
-
-# plt.subplot(3, 1, 1)
-# plt.plot(lags_kkn_evn, corr_kkn_evn)
-# plt.axvline(lag_kkn_evn, linestyle="--", label=f"Peak = {lag_kkn_evn:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"KKN -> EVN | Lag = {lag_kkn_evn:+.3f} s | CC = {cc_kkn_evn:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.subplot(3, 1, 2)
-# plt.plot(lags_kkn_knset, corr_kkn_knset)
-# plt.axvline(lag_kkn_knset, linestyle="--", label=f"Peak = {lag_kkn_knset:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"KKN -> KNSET | Lag = {lag_kkn_knset:+.3f} s | CC = {cc_kkn_knset:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.subplot(3, 1, 3)
-# plt.plot(lags_evn_knset, corr_evn_knset)
-# plt.axvline(lag_evn_knset, linestyle="--", label=f"Peak = {lag_evn_knset:+.3f}s")
-# plt.xlabel("Lag (s)")
-# plt.ylabel("Envelope CC")
-# plt.title(f"EVN -> KNSET | Lag = {lag_evn_knset:+.3f} s | CC = {cc_evn_knset:.3f}")
-# plt.legend()
-# plt.grid()
-
-# plt.suptitle("Pairwise Hilbert-Envelope Cross-Correlation")
-# plt.tight_layout()
-# plt.show()
