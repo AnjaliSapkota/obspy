@@ -1,42 +1,52 @@
 from obspy.geodetics.base import locations2degrees
 from obspy.geodetics import degrees2kilometers
 
-# KNSET
-knset_lat = 27.65337
-knset_lon = 85.302528
+# kkn
+kkn_lat = 27.8
+kkn_lon =  85.279
 
-# KKN
-kkn_lat = 27.800
-kkn_lon = 85.279
-
-# EVN
+# evn
 evn_lat = 27.95865
 evn_lon = 86.811653
 
-# KKN - EVN
-distance_kkn_evn = locations2degrees(kkn_lat,kkn_lon,evn_lat,evn_lon)
+# EQM10
+eqm10_lat = 28.299517
+eqm10_lon = 83.960148
 
-distance_kkn_evn = degrees2kilometers(distance_kkn_evn)
+# Event
+event_lat = 28.289
+event_lon = 85.528
 
-# EVN - KNSET
-distance_evn_knset = locations2degrees(evn_lat,evn_lon,knset_lat,knset_lon)
+# kkn - Event
+distance_kkn_event = locations2degrees(
+    kkn_lat, kkn_lon,
+    event_lat, event_lon
+)
+distance_kkn_event = degrees2kilometers(distance_kkn_event)
 
-distance_evn_knset = degrees2kilometers(distance_evn_knset)
+# evn - Event
+distance_evn_event = locations2degrees(
+    evn_lat, evn_lon,
+    event_lat, event_lon
+)
+distance_evn_event = degrees2kilometers(distance_evn_event)
 
-# KKN - KNSET
-distance_kkn_knset = locations2degrees(kkn_lat,kkn_lon,knset_lat,knset_lon)
+# EQM10 - Event
+distance_eqm10_event = locations2degrees(
+    eqm10_lat, eqm10_lon,
+    event_lat, event_lon
+)
+distance_eqm10_event = degrees2kilometers(distance_eqm10_event)
 
-distance_kkn_knset = degrees2kilometers(distance_kkn_knset)
-
-print("KKN - KNSET")
-print("Distance:", distance_kkn_knset, "km")
+print("kkn - Event")
+print("Distance:", distance_kkn_event, "km")
 
 print()
 
-print("KNSET - EVN")
-print("Distance:", distance_evn_knset, "km")
+print("evn - Event")
+print("Distance:", distance_evn_event, "km")
 
 print()
 
-print("KKN - EVN")
-print("Distance:", distance_kkn_evn, "km")
+print("EQM10 - Event")
+print("Distance:", distance_eqm10_event, "km")
