@@ -9,6 +9,7 @@ import numpy as np
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
+from scipy.optimize import least_squares
 from scipy.stats import kurtosis
 
 
@@ -49,7 +50,7 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
     st.detrend("linear")
     st.detrend("demean")
     st.taper(max_percentage=0.05, type="hann")
-    st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True,)
+    st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
     st.interpolate(sampling_rate=fs, method="linear")
 
     t0 = max(tr.stats.starttime for tr in st)
@@ -116,7 +117,7 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.
     return int(refined_idx)
 
 
-def pick_p(z,fs,start,sta=1.0,lta=10.0,thr_on=3.5,thr_off=1.5,aic_before=2.0,aic_after=4.0,):
+def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=2.0, aic_after=4.0):
     nsta = int(sta * fs)
     nlta = int(lta * fs)
 
@@ -153,20 +154,7 @@ def pick_p(z,fs,start,sta=1.0,lta=10.0,thr_on=3.5,thr_off=1.5,aic_before=2.0,aic
     )
 
 
-def pick_s(
-    env,
-    fs,
-    t0,
-    p_time,
-    sta=1.0,
-    lta=8.0,
-    min_sp_sec=4.0,
-    max_sp_sec=50.0,
-    thr_on=2.5,
-    thr_off=1.0,
-    aic_before=1.5,
-    aic_after=4.0,
-):
+def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
     """Detect S after P."""
     nsta = max(1, int(sta * fs))
     nlta = max(nsta + 1, int(lta * fs))
@@ -212,15 +200,7 @@ def pick_s(
     )
 
 
-def calculate_quality_metrics(
-    z,
-    env,
-    fs,
-    p_time,
-    s_time,
-    p_sta_trigger,
-    s_sta_trigger,
-):
+def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_trigger):
     t0 = z.stats.starttime
     p_idx = int((p_time - t0) * fs)
     s_idx = int((s_time - t0) * fs)
@@ -330,154 +310,58 @@ def xy_to_latlon(x, y, lat0, lon0):
     lat = lat0 + y / 110.574
     lon = lon0 + x / (111.32 * np.cos(np.radians(lat0)))
     return lat, lon
+
+
 def locate_epicenter_lsq(obs, source_depth_km=0.0):
-    if len(obs) != 3:
-        raise ValueError("Intersection method requires exactly 3 stations")
+    n = len(obs)
+    if n < 3:
+        raise ValueError("Need at least 3 stations")
 
-    lat0 = np.mean([o[0] for o in obs])
-    lon0 = np.mean([o[1] for o in obs])
+    lat0 = float(np.mean([o[0] for o in obs]))
+    lon0 = float(np.mean([o[1] for o in obs]))
 
-    xy = []
-    for lat, lon, hypocentral_distance in obs:
-        if hypocentral_distance <= source_depth_km:
-            epicentral_distance = 0.1
-        else:
-            epicentral_distance = np.sqrt(
-                hypocentral_distance**2 - source_depth_km**2
-            )
-
+    sx, sy, sr = [], [], []
+    for lat, lon, hypo in obs:
+        r = 0.1 if hypo <= source_depth_km else np.sqrt(hypo**2 - source_depth_km**2)
         x, y = latlon_to_xy(lat, lon, lat0, lon0)
-        xy.append((x, y, epicentral_distance))
+        sx.append(x)
+        sy.append(y)
+        sr.append(r)
+    sx, sy, sr = np.array(sx), np.array(sy), np.array(sr)
 
-    x1, y1, r1 = xy[0]
-    x2, y2, r2 = xy[1]
-    x3, y3, r3 = xy[2]
-
-    dx12 = x2 - x1
-    dy12 = y2 - y1
-    d12 = np.sqrt(dx12**2 + dy12**2)
-
-    if d12 == 0:
+    if len(set(zip(np.round(sx, 4), np.round(sy, 4)))) < n:
         raise ValueError("Two stations have identical coordinates")
 
-    ex = dx12 / d12
-    ey = dy12 / d12
+    def resid(p):
+        return np.hypot(p[0] - sx, p[1] - sy) - sr
 
-    # Chord midpoint along baseline
-    a = (r1**2 - r2**2 + d12**2) / (2 * d12)
+    # starting points
+    starts = [np.array([sx.mean(), sy.mean()])]
 
-    # Perpendicular offset to intersection points
-    h_squared = r1**2 - a**2
-    h = np.sqrt(max(0.0, h_squared))
+    # Linearised solution: subtract circle 1 from circles 2..N
+    A = np.column_stack([2 * (sx[1:] - sx[0]), 2 * (sy[1:] - sy[0])])
+    b = (sr[0]**2 - sr[1:]**2) + (sx[1:]**2 - sx[0]**2) + (sy[1:]**2 - sy[0]**2)
+    if np.linalg.matrix_rank(A) == 2:
+        starts.append(np.linalg.lstsq(A, b, rcond=None)[0])
 
-    xm = x1 + a * ex
-    ym = y1 + a * ey
+    # a few offset starts to avoid the mirror-image minimum
+    spread = max(np.ptp(sx), np.ptp(sy), 10.0)
+    for ang in np.linspace(0, 2 * np.pi, 6, endpoint=False):
+        starts.append(starts[0] + 0.5 * spread * np.array([np.cos(ang), np.sin(ang)]))
 
-    px = -ey
-    py = ex
+    best = None
+    for s0 in starts:
+        sol = least_squares(resid, s0, method="lm")
+        if best is None or sol.cost < best.cost:
+            best = sol
 
-    p1 = (xm + h * px, ym + h * py)
-    p2 = (xm - h * px, ym - h * py)
-
-    # Calculate total RMS residual across all 3 station circles for both roots
-    def calc_rms(point):
-        px_c, py_c = point
-        res = []
-        for sx, sy, r in xy:
-            dist = np.sqrt((px_c - sx)**2 + (py_c - sy)**2)
-            res.append(dist - r)
-        return np.sqrt(np.mean(np.array(res)**2)), res
-
-    rms1, res1 = calc_rms(p1)
-    rms2, res2 = calc_rms(p2)
-
-    # Choose the candidate root that minimizes overall residual RMS across all stations
-    if rms1 <= rms2:
-        x_epi, y_epi = p1
-        rms = rms1
-        residuals = res1
-    else:
-        x_epi, y_epi = p2
-        rms = rms2
-        residuals = res2
-
+    x_epi, y_epi = best.x
+    residuals = resid(best.x)
+    rms = float(np.sqrt(np.mean(residuals**2)))
     lat_epi, lon_epi = xy_to_latlon(x_epi, y_epi, lat0, lon0)
 
-    return float(lat_epi), float(lon_epi), float(rms), residuals
+    return float(lat_epi), float(lon_epi), rms, [float(r) for r in residuals]
 
-    def third_circle_error(point):
-        x, y = point
-        distance = np.sqrt((x - x3)**2 + (y - y3)**2)
-        return abs(distance - r3)
-
-    # Select candidate closest to station 3 circle
-    if third_circle_error(p1) <= third_circle_error(p2):
-        x_epi, y_epi = p1
-    else:
-        x_epi, y_epi = p2
-
-    residuals = [
-        float(np.sqrt((x_epi - sx)**2 + (y_epi - sy)**2) - r)
-        for sx, sy, r in xy
-    ]
-
-    lat_epi, lon_epi = xy_to_latlon(x_epi, y_epi, lat0, lon0)
-    rms = float(np.sqrt(np.mean(np.asarray(residuals)**2)))
-
-    return float(lat_epi), float(lon_epi), rms, residuals
-
-    # Select the intersection that is closest to the
-    # third station's circle radius
-    def third_circle_error(point):
-        x, y = point
-        distance = np.sqrt(
-            (x - x3)**2 +
-            (y - y3)**2
-        )
-        return abs(distance - r3)
-
-    error1 = third_circle_error(p1)
-    error2 = third_circle_error(p2)
-
-    if error1 <= error2:
-        x_epi, y_epi = p1
-    else:
-        x_epi, y_epi = p2
-
-    # Calculate residuals against all three observed circles
-    residuals = []
-
-    for sx, sy, r in xy:
-        calculated_distance = np.sqrt(
-            (x_epi - sx)**2 +
-            (y_epi - sy)**2
-        )
-
-        residuals.append(
-            float(calculated_distance - r)
-        )
-
-    lat_epi, lon_epi = xy_to_latlon(
-        x_epi,
-        y_epi,
-        lat0,
-        lon0,
-    )
-
-    rms = float(
-        np.sqrt(
-            np.mean(
-                np.asarray(residuals)**2
-            )
-        )
-    )
-
-    return (
-        float(lat_epi),
-        float(lon_epi),
-        rms,
-        residuals,
-    )
 
 def _fig_to_png_b64(fig):
     buf = io.BytesIO()
@@ -486,63 +370,72 @@ def _fig_to_png_b64(fig):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def waveform_stalta_png(name,z,env,cft_p,cft_s,tp,ts,p_sta,s_sta,thr_on,thr_off,thr_on_s,thr_off_s,):
+def waveform_stalta_png(
+    name,
+    z,
+    env,
+    cft_p,
+    cft_s,
+    tp,
+    ts,
+    p_sta,
+    s_sta,
+    thr_on,
+    thr_off,
+    thr_on_s,
+    thr_off_s,
+):
     t = z.times("matplotlib")
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+    # Change to 4 subplots so Envelope gets its own row
+    fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 
-    axes[0].plot(t, env, color="gray", lw=0.6, label="Horizontal energy")
-    axes[0].plot(t, z.data, color="black", lw=0.6, label="Z")
-    axes[0].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", label="P AIC pick")
-
+    # 1. Vertical Waveform
+    axes[0].plot(t, z.data, color="black", lw=0.7, label="Vertical (Z)")
+    axes[0].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", lw=1.2, label="P Pick")
     if ts is not None:
-        axes[0].axvline(ts.matplotlib_date, color="#d1432b", ls="--", label="S AIC pick")
+        axes[0].axvline(ts.matplotlib_date, color="#d1432b", ls="--", lw=1.2, label="S Pick")
+    axes[0].set_ylabel("Z Amplitude")
+    axes[0].legend(loc="upper right", fontsize=8, framealpha=0.9)
+    axes[0].set_title(f"{name} — Waveform & Triggers")
 
-    axes[0].set_ylabel("Amplitude")
-    axes[0].legend(loc="upper right", fontsize=8)
-    axes[0].set_title(f"{name} — waveform")
+    # 2. Horizontal Envelope
+    axes[1].plot(t, env, color="#555555", lw=0.7, label="Horizontal Envelope")
+    axes[1].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", lw=1.2)
+    if ts is not None:
+        axes[1].axvline(ts.matplotlib_date, color="#d1432b", ls="--", lw=1.2, label="S Pick")
+    axes[1].set_ylabel("Horiz. Env")
+    axes[1].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    axes[1].plot(t, cft_p, color="#2f6fed", lw=0.8)
-    axes[1].axhline(thr_on, color="#1f9e6b", ls=":", lw=1, label=f"on={thr_on}")
-    axes[1].axhline(thr_off, color="#999", ls=":", lw=1, label=f"off={thr_off}")
-    axes[1].axvline(tp.matplotlib_date, color="#2f6fed", ls="--")
-
+    # 3. P-wave STA/LTA
+    axes[2].plot(t, cft_p, color="#2f6fed", lw=0.8, label="P STA/LTA")
+    axes[2].axhline(thr_on, color="#1f9e6b", ls=":", lw=1, label=f"On ({thr_on})")
+    axes[2].axhline(thr_off, color="#888888", ls=":", lw=1, label=f"Off ({thr_off})")
+    axes[2].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", lw=1)
     if p_sta is not None:
-        axes[1].axvline(p_sta.matplotlib_date, color="orange", ls=":", label="P STA/LTA trigger")
+        axes[2].axvline(p_sta.matplotlib_date, color="#e67e22", ls=":", lw=1.2, label="P Trigger")
+    axes[2].set_ylabel("STA/LTA (P)")
+    axes[2].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    axes[1].set_ylabel("STA/LTA (P)")
-    axes[1].legend(loc="upper right", fontsize=8)
-
-    axes[2].plot(t, cft_s, color="#d1432b", lw=0.8)
-    axes[2].axhline(thr_on_s, color="#1f9e6b", ls=":", lw=1, label=f"on={thr_on_s}")
-    axes[2].axhline(thr_off_s, color="#999", ls=":", lw=1, label=f"off={thr_off_s}")
-    axes[2].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", alpha=0.5)
-
+    # 4. S-wave STA/LTA
+    axes[3].plot(t, cft_s, color="#d1432b", lw=0.8, label="S STA/LTA")
+    axes[3].axhline(thr_on_s, color="#1f9e6b", ls=":", lw=1, label=f"On ({thr_on_s})")
+    axes[3].axhline(thr_off_s, color="#888888", ls=":", lw=1, label=f"Off ({thr_off_s})")
+    axes[3].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", alpha=0.4, lw=1)
     if ts is not None:
-        axes[2].axvline(ts.matplotlib_date, color="#d1432b", ls="--")
-
+        axes[3].axvline(ts.matplotlib_date, color="#d1432b", ls="--", lw=1)
     if s_sta is not None:
-        axes[2].axvline(s_sta.matplotlib_date, color="orange", ls=":", label="S STA/LTA trigger")
+        axes[3].axvline(s_sta.matplotlib_date, color="#e67e22", ls=":", lw=1.2, label="S Trigger")
+    axes[3].set_ylabel("STA/LTA (S)")
+    axes[3].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    axes[2].set_ylabel("STA/LTA (S)")
-    axes[2].legend(loc="upper right", fontsize=8)
+    axes[3].xaxis_date()
+    axes[3].set_xlabel("Time (UTC)")
 
-    axes[2].xaxis_date()
-    axes[2].set_xlabel("Time")
-
-    if ts is not None:
-        sp = ts - tp
-        pad_before = max(3.0, 0.3 * sp)
-        pad_after = max(5.0, 0.5 * sp)
-        xlim = (
-            (tp - pad_before).matplotlib_date,
-            (ts + pad_after).matplotlib_date,
-        )
-    else:
-        xlim = (
-            (tp - 5).matplotlib_date,
-            (tp + 60).matplotlib_date,
-        )
+    xlim = (
+        z.stats.starttime.matplotlib_date,
+        z.stats.endtime.matplotlib_date,
+    )
 
     for ax in axes:
         ax.set_xlim(*xlim)
@@ -614,6 +507,7 @@ def run_location(
     max_sp_sec=50.0,
     thr_on_s=2.5,
     thr_off_s=1.0,
+    exclude_rejected=True,
 ):
     client = Client(base_url)
     k = vp * vs / (vp - vs)
@@ -621,6 +515,7 @@ def run_location(
     station_results = []
     obs = []
     names = []
+    used_entries = []   # station entries that actually went into the solution
 
     for station in stations:
         name = f"{station['net']}.{station['sta']}"
@@ -631,8 +526,8 @@ def run_location(
         }
 
         try:
-            z, env = get_three_components(client,station,start,end,fs,fmin,fmax,wait_sec,)
-            tp, cft_p, p_sta_time, p_trigger = pick_p(z,fs,start,sta_p,lta_p,thr_on,thr_off,)
+            z, env = get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec)
+            tp, cft_p, p_sta_time, p_trigger = pick_p(z, fs, start, sta_p, lta_p, thr_on, thr_off)
 
             if tp is None:
                 entry["error"] = "No P trigger found"
@@ -640,7 +535,10 @@ def run_location(
                 station_results.append(entry)
                 continue
 
-            ts, cft_s, s_sta_time, s_trigger = pick_s(env,fs,z.stats.starttime,tp,sta_s,lta_s,min_sp_sec,max_sp_sec,thr_on_s,thr_off_s,)
+            ts, cft_s, s_sta_time, s_trigger = pick_s(
+                env, fs, z.stats.starttime, tp, sta_s, lta_s,
+                min_sp_sec, max_sp_sec, thr_on_s, thr_off_s,
+            )
 
             if ts is None:
                 entry["error"] = f"No S trigger found in window (P at {tp.isoformat()[11:23]})"
@@ -656,7 +554,7 @@ def run_location(
             sp_diff = float(ts - tp)
             dist_km = float(sp_diff * k)
 
-            q_info = calculate_quality_metrics(z,env,fs,tp,ts,p_trigger,s_trigger,)
+            q_info = calculate_quality_metrics(z, env, fs, tp, ts, p_trigger, s_trigger)
 
             entry.update(
                 {
@@ -665,27 +563,23 @@ def run_location(
                     "sp_diff": sp_diff,
                     "distance_km": dist_km,
                     "waveform_png": waveform_stalta_png(
-                        name,
-                        z,
-                        env,
-                        cft_p,
-                        cft_s,
-                        tp,
-                        ts,
-                        p_sta_time,
-                        s_sta_time,
-                        thr_on,
-                        thr_off,
-                        thr_on_s,
-                        thr_off_s,
+                        name, z, env, cft_p, cft_s, tp, ts,
+                        p_sta_time, s_sta_time,
+                        thr_on, thr_off, thr_on_s, thr_off_s,
                     ),
                     "spectrogram_png": spectrogram_png(name, z),
                     **q_info,
                 }
             )
 
-            obs.append((station["lat"], station["lon"], dist_km))
-            names.append(name)
+            if exclude_rejected and entry.get("quality") == "REJECT":
+                entry.setdefault("quality_notes", []).append(
+                    "Excluded from location (REJECT quality)"
+                )
+            else:
+                obs.append((station["lat"], station["lon"], dist_km))
+                names.append(name)
+                used_entries.append(entry)
 
         except Exception as e:
             entry["error"] = str(e)
@@ -697,32 +591,24 @@ def run_location(
         try:
             lat_epi, lon_epi, rms, residuals = locate_epicenter_lsq(obs)
 
-            obs_idx = 0
-            for sr in station_results:
-                if "p_time" in sr and sr.get("quality") != "REJECT":
-                    sr["residual_km"] = residuals[obs_idx]
-                    obs_idx += 1
-
             origin_times = []
-            for sr in station_results:
-                if "p_time" in sr and sr.get("quality") != "REJECT":
-                    p_utc = UTCDateTime(sr["p_time"])
-                    origin_times.append(p_utc - (sr["distance_km"] / vp))
+            for entry, res in zip(used_entries, residuals):
+                entry["residual_km"] = res
+                origin_times.append(
+                    UTCDateTime(entry["p_time"]) - entry["distance_km"] / vp
+                )
 
-            avg_origin_time = (
-                UTCDateTime(np.mean([t.timestamp for t in origin_times])).isoformat()
-                if origin_times
-                else None
-            )
+            avg_origin_time = UTCDateTime(
+                float(np.mean([t.timestamp for t in origin_times]))
+            ).isoformat()
 
             return {
                 "located": True,
                 "epicenter": {"lat": lat_epi, "lon": lon_epi},
                 "rms_km": rms,
+                "n_stations_used": len(obs),
                 "origin_time": avg_origin_time,
-                "circle_map_png": circle_map_png(
-                    obs, names, (lat_epi, lon_epi)
-                ),
+                "circle_map_png": circle_map_png(obs, names, (lat_epi, lon_epi)),
                 "stations": station_results,
             }
         except Exception as e:
@@ -734,6 +620,6 @@ def run_location(
 
     return {
         "located": False,
-        "error": f"Insufficient valid station picks ({len(obs)}/3 required)",
+        "error": f"Insufficient valid station picks ({len(obs)} usable, 3 required)",
         "stations": station_results,
     }

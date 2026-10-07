@@ -439,7 +439,8 @@ function showSta(d){
       `<div><span>Epicenter latitude</span><b>${e.lat.toFixed(4)}\u00b0 N</b></div>
        <div><span>Epicenter longitude</span><b>${e.lon.toFixed(4)}\u00b0 E</b></div>
        <div><span>Origin time (UTC)</span><b>${d.origin_time.slice(11,23)}</b></div>
-       <div><span>RMS misfit</span><b>${d.rms_km.toFixed(1)} km</b></div>`;
+       <div><span>RMS misfit</span><b>${d.rms_km.toFixed(1)} km</b></div>
+       <div><span>Stations used</span><b>${d.n_stations_used}</b></div>`;
     pts.push([e.lat, e.lon]);
     L.circleMarker([e.lat, e.lon], {radius:9, color:'#d1432b', fillColor:'#d1432b', fillOpacity:.85})
       .bindTooltip('Epicenter', {permanent:true, direction:'top'}).addTo(layer);
