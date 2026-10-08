@@ -138,10 +138,7 @@ def start_seedlink(stations, buffer):
                     f"{server}"
                 )
 
-                client = SeedLinkListener(
-                    server,
-                    buffer
-                )
+                client = SeedLinkListener(server, buffer)
 
                 client.connect()
 
@@ -1518,15 +1515,10 @@ if __name__ == "__main__":
         buffer
     )
 
-    print(
-        "Waiting for live data..."
-    )
+    print("Waiting for live data")
 
     while True:
-
-        time.sleep(
-            RUN_EVERY
-        )
+        time.sleep(RUN_EVERY)
 
         buffer.prune()
 
