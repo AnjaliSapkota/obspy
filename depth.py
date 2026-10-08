@@ -10,20 +10,30 @@ from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
 
 SEEDLINK_HOST = "ring.wscada.net:18000"
 
+# Global System Parameters
 fs = 20.0
 fmin = 1.0
 fmax = 8.0
 buffer = 60
 scan = 2
+
 sta_p = 1.0
 lta_p = 10.0
-p_on = 3.5
-p_off = 1.5
+p_min_threshold = 3.0
+p_max_threshold = 8.0
+p_percentile = 99.0
+p_off_ratio = 0.4
 
 sta_s = 1.0
 lta_s = 8.0
-s_on = 2.5
-s_off = 1.0
+s_min_threshold = 2.0
+s_max_threshold = 6.0
+s_percentile = 99.0
+s_off_ratio = 0.4
+
+background_exclude = 10.0
+threshold_update_interval = 30.0
+
 min_sp = 4.0
 max_sp = 120.0
 
@@ -53,7 +63,13 @@ for station in stations:
         "s_trigger": None,
         "quality": None,
         "distance_km": None,
-        "last_checked": None,
+        "threshold_last_update": None,
+        "p_threshold": 3.5,
+        "p_off_threshold": 1.5,
+        "p_background_level": 1.0,
+        "s_threshold": 2.5,
+        "s_off_threshold": 1.0,
+        "s_background_level": 1.0,
     }
 
 
@@ -86,17 +102,14 @@ class LiveSeedLinkClient(EasySeedLinkClient):
 
 def prepare_station_stream(station_name, fs=20.0, fmin=1.0, fmax=8.0):
     with buffer_lock:
+        if len(buffers[station_name]) == 0:
+            return None, None
         st = buffers[station_name].copy()
 
-    if len(st) == 0:
-        return None, None
-
-    # select vertical component
     z_stream = st.select(component="Z")
     if len(z_stream) == 0:
         return None, None
 
-    # horizontal components
     north = st.select(component="N")
     east = st.select(component="E")
     horizontals = []
@@ -147,13 +160,96 @@ def prepare_station_stream(station_name, fs=20.0, fmin=1.0, fmax=8.0):
         tr.detrend("linear")
         tr.detrend("demean")
         tr.taper(max_percentage=0.05, type="hann")
-        tr.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
+        tr.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=False)
 
     h1_data = h1.data.astype(float)
     h2_data = h2.data.astype(float)
     env = np.sqrt(h1_data ** 2 + h2_data ** 2)
 
     return z, env
+
+
+def calculate_adaptive_threshold(cft, fs, percentile=99.0, min_thresh=2.0, max_thresh=8.0, exclude_tail_sec=10.0):
+    if len(cft) == 0:
+        return min_thresh, 1.0
+
+    exclude_samples = int(exclude_tail_sec * fs)
+    if len(cft) > exclude_samples:
+        background = cft[:-exclude_samples]
+    else:
+        background = cft
+
+    # Remove the STA/LTA startup period
+    startup_samples = int(10.0 * fs)
+
+    if len(background) > startup_samples:
+        background = background[startup_samples:]
+
+    # Keep only valid positive values
+    background = background[ np.isfinite(background)]
+
+    background = background[background > 0]
+
+    if len(background) < 50:
+        return min_thresh, 1.0
+
+    background_level = float(np.median(background))
+
+    percentile_value = float(np.percentile(background,percentile))
+
+    # Add a safety margin above the
+    # normal background distribution.
+    adaptive_thresh = (percentile_value * 1.2)
+
+    adaptive_thresh = float(
+        np.clip(adaptive_thresh,min_thresh,max_thresh))
+
+    return (adaptive_thresh,background_level)
+
+
+def update_station_thresholds(station_name, z, env, fs):
+    state = station_state[station_name]
+    now = z.stats.endtime
+
+    # Do not change thresholds during an active event
+    if state["p_time"] is not None:
+        return
+
+    # Update only every interval seconds
+    if state["threshold_last_update"] is not None:
+        elapsed = now - state["threshold_last_update"]
+        if elapsed < threshold_update_interval:
+            return
+
+    # P STA/LTA Threshold Computation
+    nsta_p = int(sta_p * fs)
+    nlta_p = int(lta_p * fs)
+
+    if len(z.data) > nlta_p + 10:
+        p_cft = recursive_sta_lta(z.data, nsta_p, nlta_p)
+        p_threshold, p_background = calculate_adaptive_threshold(p_cft, fs, p_percentile, p_min_threshold, p_max_threshold, background_exclude)
+        state["p_threshold"] = p_threshold
+        state["p_off_threshold"] = max(1.2, p_threshold * p_off_ratio)
+        state["p_background_level"] = p_background
+
+    # S STA/LTA Threshold Computation
+    nsta_s = int(sta_s * fs)
+    nlta_s = int(lta_s * fs)
+
+    if len(env) > nlta_s + 10:
+        s_cft = recursive_sta_lta(env, nsta_s, nlta_s)
+        s_threshold, s_background = calculate_adaptive_threshold(s_cft, fs, s_percentile, s_min_threshold, s_max_threshold, background_exclude,)
+        state["s_threshold"] = s_threshold
+        state["s_off_threshold"] = max(1.1, s_threshold * s_off_ratio)
+        state["s_background_level"] = s_background
+
+    state["threshold_last_update"] = now
+
+    print(
+        f"[THRESHOLD] {station_name} "
+        f"P={state['p_threshold']:.2f}/{state['p_off_threshold']:.2f} "
+        f"S={state['s_threshold']:.2f}/{state['s_off_threshold']:.2f}"
+    )
 
 
 def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.0):
@@ -180,7 +276,6 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.
 
     local_idx = np.nanargmin(aic)
     return int(i0 + local_idx)
-
 
 def pick_p(z, fs, search_start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5):
     nsta = int(sta * fs)
@@ -336,55 +431,104 @@ def xy_to_latlon(x, y, lat0, lon0):
     return lat, lon
 
 
-def locate_epicenter_lsq(obs, source_depth_km=0.0):
+def locate_hypocenter(obs, vp=6.0, vs=3.5):
     n = len(obs)
     if n < 3:
         raise ValueError("Need at least 3 stations")
 
-    lat0 = float(np.mean([o[0] for o in obs]))
-    lon0 = float(np.mean([o[1] for o in obs]))
+    lat0 = float(np.mean([o["lat"] for o in obs]))
+    lon0 = float(np.mean([o["lon"] for o in obs]))
 
-    sx, sy, sr = [], [], []
-    for lat, lon, distance in obs:
-        radius = 0.1 if distance <= source_depth_km else np.sqrt(distance ** 2 - source_depth_km ** 2)
-        x, y = latlon_to_xy(lat, lon, lat0, lon0)
-        sx.append(x)
-        sy.append(y)
-        sr.append(radius)
+    station_xy = []
+    for o in obs:
+        x, y = latlon_to_xy(o["lat"], o["lon"], lat0, lon0)
+        station_xy.append((x, y))
 
-    sx = np.asarray(sx)
-    sy = np.asarray(sy)
-    sr = np.asarray(sr)
+    station_xy = np.asarray(station_xy, dtype=float)
+    sx = station_xy[:, 0]
+    sy = station_xy[:, 1]
 
     if len(set(zip(np.round(sx, 4), np.round(sy, 4)))) < n:
         raise ValueError("Two stations have identical coordinates")
 
-    def resid(p):
-        return np.hypot(p[0] - sx, p[1] - sy) - sr
+    earliest_p = min(e["p_time"] for e in obs)
 
-    starts = [np.array([sx.mean(), sy.mean()])]
+    observed_p = np.asarray(
+        [e["p_time"].timestamp - earliest_p.timestamp for e in obs],
+        dtype=float
+    )
 
-    A = np.column_stack([2 * (sx[1:] - sx[0]), 2 * (sy[1:] - sy[0])])
-    b = (sr[0]**2 - sr[1:]**2) + (sx[1:]**2 - sx[0]**2) + (sy[1:]**2 - sy[0]**2)
-    if np.linalg.matrix_rank(A) == 2:
-        starts.append(np.linalg.lstsq(A, b, rcond=None)[0])
+    observed_s = np.asarray(
+        [e["s_time"].timestamp - earliest_p.timestamp for e in obs],
+        dtype=float
+    )
 
-    spread = max(np.ptp(sx), np.ptp(sy), 10.0)
-    for ang in np.linspace(0, 2 * np.pi, 6, endpoint=False):
-        starts.append(starts[0] + 0.5 * spread * np.array([np.cos(ang), np.sin(ang)]))
+    def residuals(params):
+        x = params[0]
+        y = params[1]
+        depth = params[2]
+        origin_relative = params[3]
 
-    best = None
-    for s0 in starts:
-        sol = least_squares(resid, s0, method="lm")
-        if best is None or sol.cost < best.cost:
-            best = sol
+        distances = np.sqrt((x - sx) ** 2 + (y - sy) ** 2 + depth ** 2)
 
-    x_epi, y_epi = best.x
-    residuals = resid(best.x)
-    rms = float(np.sqrt(np.mean(residuals**2)))
-    lat_epi, lon_epi = xy_to_latlon(x_epi, y_epi, lat0, lon0)
+        predicted_p = origin_relative + distances / vp
+        predicted_s = origin_relative + distances / vs
 
-    return float(lat_epi), float(lon_epi), rms, [float(r) for r in residuals]
+        p_residuals = predicted_p - observed_p
+        s_residuals = predicted_s - observed_s
+
+        return np.concatenate([p_residuals, s_residuals])
+
+    x0 = float(np.mean(sx))
+    y0 = float(np.mean(sy))
+    initial_depth = 10.0
+    initial_origin = -10.0
+
+    initial = np.array([x0, y0, initial_depth, initial_origin], dtype=float)
+
+    lower_bounds = np.array([-10000.0, -10000.0, 0.0, -120.0])
+    upper_bounds = np.array([10000.0, 10000.0, 300.0, 10.0])
+
+    result = least_squares(
+        residuals,
+        initial,
+        bounds=(lower_bounds, upper_bounds),
+        method="trf"
+    )
+
+    x, y, depth, origin_relative = result.x
+
+    lat, lon = xy_to_latlon(x, y, lat0, lon0)
+    origin_timestamp = earliest_p.timestamp + origin_relative
+    origin_time = UTCDateTime(origin_timestamp)
+
+    final_residuals = residuals(result.x)
+    p_residuals = final_residuals[:n]
+    s_residuals = final_residuals[n:]
+
+    rms_seconds = float(np.sqrt(np.mean(final_residuals ** 2)))
+
+    return {
+        "lat": float(lat),
+        "lon": float(lon),
+        "depth_km": float(depth),
+        "origin_time": origin_time,
+        "rms_seconds": rms_seconds,
+        "p_residuals": [float(r) for r in p_residuals],
+        "s_residuals": [float(r) for r in s_residuals],
+        "success": bool(result.success),
+        "message": result.message,
+        "cost": float(result.cost),
+    }
+
+
+def reset_station_state(name):
+    station_state[name]["p_time"] = None
+    station_state[name]["p_trigger"] = None
+    station_state[name]["s_time"] = None
+    station_state[name]["s_trigger"] = None
+    station_state[name]["quality"] = None
+    station_state[name]["distance_km"] = None
 
 
 def process_station(station):
@@ -392,16 +536,28 @@ def process_station(station):
 
     try:
         z, env = prepare_station_stream(name, fs, fmin, fmax)
+
         if z is None:
             return
 
         now = z.stats.endtime
         state = station_state[name]
 
+        # Update background adaptive thresholds dynamically
+        update_station_thresholds(name, z, env, fs)
+
         # P PICK
         if state["p_time"] is None:
             search_start = z.stats.endtime - 10.0
-            result = pick_p(z, fs, search_start, sta_p, lta_p, p_on, p_off)
+            result = pick_p(
+                z,
+                fs,
+                search_start,
+                sta_p,
+                lta_p,
+                state["p_threshold"],
+                state["p_off_threshold"],
+            )
 
             if result is not None:
                 state["p_time"] = result["time"]
@@ -411,13 +567,24 @@ def process_station(station):
         # S PICK
         if state["p_time"] is not None and state["s_time"] is None:
             if now - state["p_time"] >= min_sp:
-                result = pick_s(env, fs, z.stats.starttime, state["p_time"], sta_s, lta_s, min_sp, max_sp, s_on, s_off)
+                result = pick_s(
+                    env,
+                    fs,
+                    z.stats.starttime,
+                    state["p_time"],
+                    sta_s,
+                    lta_s,
+                    min_sp,
+                    max_sp,
+                    state["s_threshold"],
+                    state["s_off_threshold"],
+                )
 
                 if result is not None:
                     state["s_time"] = result["time"]
                     state["s_trigger"] = result["trigger"]
-
                     sp = state["s_time"] - state["p_time"]
+
                     print(f"[S] {name} {result['time'].isoformat()} S-P={sp:.2f}s STA/LTA={result['trigger']:.2f}")
 
                     q = calculate_quality_metrics(
@@ -431,16 +598,11 @@ def process_station(station):
                     distance = sp * k
                     state["distance_km"] = distance
 
-                    print(f"[DIST] {name} {distance:.2f} km quality={q['quality']} score={q['quality_score']}")
+                    print(f"[DIST-INFO] {name} {distance:.2f} km quality={q['quality']} score={q['quality_score']}")
 
-        # EXPIRE OLD EVENT
-        if state["p_time"] is not None and now - state["p_time"] > max_sp + 20:
-            state["p_time"] = None
-            state["p_trigger"] = None
-            state["s_time"] = None
-            state["s_trigger"] = None
-            state["quality"] = None
-            state["distance_km"] = None
+        # Fallback reset if P arrival timed out without forming an event
+        if state["p_time"] is not None and now - state["p_time"] > max_sp + 30:
+            reset_station_state(name)
             print(f"[RESET] {name}")
 
     except Exception as e:
@@ -453,8 +615,7 @@ def get_current_event_stations():
         name = f"{station['net']}.{station['sta']}"
         state = station_state[name]
 
-        if (state["p_time"] is None or state["s_time"] is None or
-                state["distance_km"] is None or state["quality"] is None):
+        if state["p_time"] is None or state["s_time"] is None or state["quality"] is None:
             continue
 
         if state["quality"]["quality"] == "REJECT":
@@ -468,11 +629,13 @@ def get_current_event_stations():
             "s_time": state["s_time"],
             "distance_km": state["distance_km"],
         })
+
     return entries
 
 
 def check_and_locate_event():
     global last_location_time
+
     entries = get_current_event_stations()
 
     if len(entries) < min_st:
@@ -486,41 +649,53 @@ def check_and_locate_event():
         return
 
     event_time = earliest
+
     if last_location_time is not None and abs(event_time - last_location_time) < 5:
         return
 
-    obs = [(e["lat"], e["lon"], e["distance_km"]) for e in entries]
     names = [e["name"] for e in entries]
 
     try:
-        lat, lon, rms, residuals = locate_epicenter_lsq(obs)
-
-        origin_times = [e["p_time"] - (e["distance_km"] / vp) for e in entries]
-        origin_timestamp = np.mean([t.timestamp for t in origin_times])
-        origin_time = UTCDateTime(origin_timestamp)
+        result = locate_hypocenter(entries, vp=vp, vs=vs)
 
         print("\nLIVE EARTHQUAKE LOCATION")
-        print(f"Origin time : {origin_time.isoformat()}")
-        print(f"Epicenter   : {lat:.5f} N, {lon:.5f} E")
-        print(f"RMS error   : {rms:.2f} km")
-        print(f"Stations    : {len(entries)}\n")
+        print(f"Origin time : {result['origin_time'].isoformat()}")
+        print(f"Latitude    : {result['lat']:.5f} N")
+        print(f"Longitude   : {result['lon']:.5f} E")
+        print(f"Depth       : {result['depth_km']:.2f} km")
+        print(f"RMS error   : {result['rms_seconds']:.3f} s")
+        print(f"Stations    : {len(entries)}")
+        print(f"Solver      : {result['success']}\n")
 
-        for name, residual in zip(names, residuals):
-            print(f"  {name:10s} residual = {residual:+.2f} km")
+        print("P arrival residuals:")
+        for name, residual in zip(names, result["p_residuals"]):
+            print(f"  {name:10s} {residual:+.3f} s")
 
-        print("\nStation distances:")
+        print("\nS arrival residuals:")
+        for name, residual in zip(names, result["s_residuals"]):
+            print(f"  {name:10s} {residual:+.3f} s")
+
+        print("\nObserved arrivals:")
         for entry in entries:
-            print(f"  {entry['name']:10s} {entry['distance_km']:7.2f} km P={entry['p_time'].isoformat()}")
+            print(f"  {entry['name']:10s} P={entry['p_time'].isoformat()} S={entry['s_time'].isoformat()}")
+
         print()
 
         last_location_time = event_time
+
+        for entry in entries:
+            reset_station_state(entry["name"])
 
     except Exception as e:
         print(f"[LOCATION ERROR] {e}")
 
 
 def processing_loop():
-    print(f"\nStarting real-time processing...\nBuffer: {buffer}s | Scan: {scan}s | Sampling rate: {fs} Hz\n")
+    print("\nStarting real-time processing...")
+    print(f"Buffer: {buffer}s | Scan: {scan}s | Sampling rate: {fs} Hz")
+    print(f"Vp: {vp} km/s | Vs: {vs} km/s")
+    print("Locator: 3D P/S arrival-time nonlinear least squares\n")
+
     while True:
         loop_start = time.time()
 
@@ -535,21 +710,18 @@ def processing_loop():
 
 def start_seedlink():
     print(f"Connecting to SeedLink: {SEEDLINK_HOST}")
-    # Instantiate LiveSeedLinkClient instead of base EasySeedLinkClient
     client = LiveSeedLinkClient(SEEDLINK_HOST, autoconnect=False)
     client.conn.timeout = 10
-    
-    # Establish connection before selecting streams
     client.connect()
- 
+
     for station in stations:
         net = station["net"]
         sta = station["sta"]
-        print(f"Subscribing: {net}.{sta}.EH?")
-        client.select_stream(net, sta, "EH?")
+        client.select_stream(net,sta,"EH?")
 
     print("Waiting for waveform data...")
     client.run()
+
 
 if __name__ == "__main__":
     print("Stations:")
