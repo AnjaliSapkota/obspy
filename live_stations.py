@@ -6,20 +6,18 @@ SERVER = "ring.wscada.net:18000"
 print(f"Connecting to {SERVER} to retrieve station inventory...")
 
 try:
-    # 1. Initialize client and connect
+    # Initialize client and connect
     client = EasySeedLinkClient(SERVER, autoconnect=False)
     client.conn.timeout = 10
     client.connect()
 
-    # 2. Retrieve raw XML string from SeedLink server
+    # Retrieve raw XML string from SeedLink server
     raw_xml_str = client.get_info("STREAMS")
 
-    # 3. Parse string into an XML ElementTree
+    # Parse string into an XML ElementTree
     root = ET.fromstring(raw_xml_str)
 
-    print("\n--- AVAILABLE STATIONS & CHANNELS ---")
-
-    # 4. Iterate through <station> and <stream> nodes
+    # Iterate through <station> and <stream> nodes
     for station in root.findall(".//station"):
         net_code = station.get("network", "N/A")
         sta_code = station.get("name", "N/A")
@@ -39,8 +37,47 @@ try:
             f"Network: {net_code:<5} | Station: {sta_code:<8} | Channels: {channel_str}"
         )
 
-    # 5. Close connection
+    # Close connection
     client.close()
 
 except Exception as e:
     print(f"\n[ERROR]: Could not retrieve station list: {e}")
+    
+    
+# from obspy import UTCDateTime
+# from obspy.clients.fdsn import Client
+
+# start = UTCDateTime("2026-08-26T02:30:00")
+# end   = UTCDateTime("2026-08-26T03:00:00")
+
+# client = Client("EARTHSCOPE")
+
+# print("Searching EarthScope stations")
+# print(f"Start: {start}")
+# print(f"End:  {end}")
+# print()
+
+# # Nepal bounding box
+# # latitude: 26–31 N
+# # longitude: 80–89 E
+
+# inventory = client.get_stations(
+#     starttime=start,
+#     endtime=end,
+#     minlatitude=26,
+#     maxlatitude=31,
+#     minlongitude=80,
+#     maxlongitude=89,
+#     level="channel"
+# )
+
+# for network in inventory:
+#     for station in network:
+#         for channel in station:
+
+#             print(
+#                 f"{network.code:5s} "
+#                 f"{station.code:6s} "
+#                 f"{channel.location_code:4s} "
+#                 f"{channel.code:5s}"
+#             )

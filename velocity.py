@@ -361,8 +361,8 @@ if __name__ == "__main__":
         {"sta": "EQM13", "lat": 28.256323, "lon": 85.367569, "net": "NP", "cha": "EHZ", "loc": "*"},
     ]
 
-    start = "2026-09-22T07:45:00"
-    end = "2026-09-22T07:55:00"
+    start = "2026-10-06T16:52:00"
+    end = "2026-10-06T17:05:00"
 
     result = run_velocity_calculation(
         stations=stations,
