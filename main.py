@@ -1,14 +1,12 @@
 from flask import Flask, jsonify, render_template_string, request
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-
-import earthquake as core_sta          # STA/LTA + S-P trilateration
-import triangulate as core_tdoa   # TDOA envelope cross-correlation
+import earthquake as core_sta
+import triangulate as core_tdoa
 
 app = Flask(__name__)
 
 DEFAULT_BASE_URL = "https://seiscomp.alertnepal.online"
-
 
 STA_STATIONS = [
     {"sta": "EQM13", "lat": 28.256323, "lon": 85.367569, "net": "NP", "cha": "EHZ", "loc": "*"},
@@ -122,7 +120,6 @@ def run_tdoa():
         if v_min <= 0 or v_min >= v_max:
             raise ValueError("Min velocity must be positive and smaller than max velocity.")
 
-
         result = core_tdoa.run_triangulation(
             stations=p["stations"],
             start=UTCDateTime(p["start"]),
@@ -218,7 +215,7 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
   <button id="tabbtn_t" onclick="showTab('t')">TDOA method</button>
 </div>
 
-<!-- ============ STA/LTA ============ -->
+<!--  STA/LTA  -->
 <main class="view active" id="view_a">
 <div class="panel">
   <h2>Data source</h2>
@@ -268,7 +265,7 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
 </div>
 </main>
 
-<!-- TDOA  -->
+<!-- TDOA -->
 <main class="view" id="view_t">
 <div class="panel">
   <h2>Data source</h2>
@@ -324,7 +321,6 @@ function showTab(k){
   }
   if(maps[k]) setTimeout(()=>maps[k].invalidateSize(), 50);
 }
-
 
 function setF(k,i,f,val){ S[k][i][f] = val; }
 function setNum(k,i,f,val){ const n = parseFloat(val); S[k][i][f] = Number.isFinite(n) ? n : null; }
@@ -392,7 +388,7 @@ function checkCoords(k){
   return true;
 }
 
-/*  STA/LTA  */
+/* STA/LTA */
 async function runSta(){
   const btn = document.getElementById('go_a'); btn.disabled = true;
   if(!checkCoords('a')){ btn.disabled = false; return; }
@@ -416,45 +412,78 @@ async function runSta(){
 }
 
 function showSta(d){
-  document.getElementById('res_a').style.display='block';
+  document.getElementById('res_a').style.display = 'block';
 
+  // Safe Table Headers and Rows
   document.getElementById('tbl_a').innerHTML =
-    '<tr><th>Station</th><th>P time (UTC)</th><th>S time (UTC)</th><th>S\u2013P (s)</th><th>Distance (km)</th><th>Fit residual (km)</th></tr>' +
+    '<tr>' +
+      '<th>Station</th>' +
+      '<th>P time (UTC)</th>' +
+      '<th>S time (UTC)</th>' +
+      '<th>S–P (s)</th>' +
+      '<th>Epi. Dist (km)</th>' +
+      '<th>Hypo. Dist (km)</th>' +
+      '<th>Local Mag (M<sub>L</sub>)</th>' +
+      '<th>Residual (km)</th>' +
+    '</tr>' +
     d.stations.map(s => s.p_time
-      ? `<tr><td>${s.name}</td><td>${s.p_time.slice(11,23)}</td><td>${s.s_time.slice(11,23)}</td><td>${s.sp_diff.toFixed(2)}</td><td>${s.distance_km.toFixed(1)}</td><td${Math.abs(s.residual_km||0)>15?' style="color:var(--hot)"':''}>${s.residual_km!==undefined?s.residual_km.toFixed(1):'\u2013'}</td></tr>`
-      : `<tr><td>${s.name}</td><td colspan="5" style="color:var(--hot)">${s.error||'no pick'}</td></tr>`
+      ? `<tr>
+          <td>${s.name}</td>
+          <td>${s.p_time.slice(11,23)}</td>
+          <td>${s.s_time.slice(11,23)}</td>
+          <td>${Number.isFinite(s.sp_diff) ? s.sp_diff.toFixed(2) : '–'}</td>
+          <td>${Number.isFinite(s.epicentral_distance_km) ? s.epicentral_distance_km.toFixed(1) : '–'}</td>
+          <td>${Number.isFinite(s.hypo_distance_km) ? s.hypo_distance_km.toFixed(1) : '–'}</td>
+          <td><b>${Number.isFinite(s.ml) ? s.ml.toFixed(2) : '–'}</b></td>
+          <td${Math.abs(s.residual_km||0)>15?' style="color:var(--hot)"':''}>${Number.isFinite(s.residual_km) ? s.residual_km.toFixed(1) : '–'}</td>
+         </tr>`
+      : `<tr><td>${s.name}</td><td colspan="7" style="color:var(--hot)">${s.error||'no pick'}</td></tr>`
     ).join('');
 
   const [map, layer] = getMap('a');
   const pts = [];
   for(const s of d.stations){
-    pts.push([s.lat, s.lon]);
-    L.circleMarker([s.lat, s.lon], {radius:6, color:'#0b6e75', fillColor:'#0b6e75', fillOpacity:.9})
-      .bindTooltip(s.name, {permanent:true, direction:'right'}).addTo(layer);
+    if(Number.isFinite(s.lat) && Number.isFinite(s.lon)) {
+      pts.push([s.lat, s.lon]);
+      L.circleMarker([s.lat, s.lon], {radius:6, color:'#0b6e75', fillColor:'#0b6e75', fillOpacity:.9})
+        .bindTooltip(s.name, {permanent:true, direction:'right'}).addTo(layer);
+    }
   }
 
-  if(d.located){
+  //  Safe Summary Banner with Type Guards
+  if(d.located && d.epicenter){
     const e = d.epicenter;
+    const magStr = Number.isFinite(d.magnitude_ml) ? d.magnitude_ml.toFixed(2) : 'N/A';
+    const rmsStr = Number.isFinite(d.rms_km) ? d.rms_km.toFixed(1) + ' km' : 'N/A';
+    const timeStr = d.origin_time ? d.origin_time.slice(11,23) : 'N/A';
+
     document.getElementById('big_a').innerHTML =
-      `<div><span>Epicenter latitude</span><b>${e.lat.toFixed(4)}\u00b0 N</b></div>
-       <div><span>Epicenter longitude</span><b>${e.lon.toFixed(4)}\u00b0 E</b></div>
-       <div><span>Origin time (UTC)</span><b>${d.origin_time.slice(11,23)}</b></div>
-       <div><span>RMS misfit</span><b>${d.rms_km.toFixed(1)} km</b></div>
-       <div><span>Stations used</span><b>${d.n_stations_used}</b></div>`;
+      `<div><span>Epicenter Latitude</span><b>${e.lat.toFixed(4)}° N</b></div>
+       <div><span>Epicenter Longitude</span><b>${e.lon.toFixed(4)}° E</b></div>
+       <div><span>Magnitude (M<sub>L</sub>)</span><b style="color:var(--accent)">${magStr}</b></div>
+       <div><span>Origin Time (UTC)</span><b>${timeStr}</b></div>
+       <div><span>RMS Misfit</span><b>${rmsStr}</b></div>
+       <div><span>Stations Used</span><b>${d.n_stations_used || 0}</b></div>`;
+    
     pts.push([e.lat, e.lon]);
     L.circleMarker([e.lat, e.lon], {radius:9, color:'#d1432b', fillColor:'#d1432b', fillOpacity:.85})
       .bindTooltip('Epicenter', {permanent:true, direction:'top'}).addTo(layer);
-    document.getElementById('circ_a').src = 'data:image/png;base64,' + d.circle_map_png;
+    if(d.circle_map_png) {
+      document.getElementById('circ_a').src = 'data:image/png;base64,' + d.circle_map_png;
+    }
   } else {
-    document.getElementById('big_a').innerHTML = `<div><span>Status</span><b style="color:var(--hot)">Not located</b></div>`;
+    document.getElementById('big_a').innerHTML = `<div><span>Status</span><b style="color:var(--hot)">${d.error || 'Not located'}</b></div>`;
     document.getElementById('circ_a').removeAttribute('src');
   }
+
   if(pts.length){ map.fitBounds(pts, {padding:[40,40]}); setTimeout(()=>map.invalidateSize(),50); }
 
+  // Safe Station Card Rendering
   const box = document.getElementById('stacards_a'); box.innerHTML = '';
   for(const s of d.stations){
     const q = s.quality || 'REJECT';
-    let html = `<div class="stacard"><h3><span>${s.name}</span><span class="badge ${q}">${q}</span></h3>`;
+    const mlLabel = Number.isFinite(s.ml) ? `(M<sub>L</sub> ${s.ml.toFixed(2)})` : '';
+    let html = `<div class="stacard"><h3><span>${s.name} ${mlLabel}</span><span class="badge ${q}">${q}</span></h3>`;
     if(s.error) html += `<div class="err">${s.error}</div>`;
     if(s.quality_notes && s.quality_notes.length) html += `<div class="notes"><b>Notes:</b> ${s.quality_notes.join(', ')}</div>`;
     if(s.waveform_png) html += `<img class="plot" src="data:image/png;base64,${s.waveform_png}">`;
@@ -464,7 +493,7 @@ function showSta(d){
   }
 }
 
-/*  TDOA  */
+/* TDOA */
 async function runTdoa(){
   const btn = document.getElementById('go_t'); btn.disabled = true;
   if(!checkCoords('t')){ btn.disabled = false; return; }

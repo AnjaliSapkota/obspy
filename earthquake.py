@@ -1,16 +1,15 @@
 import base64
 import io
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 from scipy.optimize import least_squares
 from scipy.stats import kurtosis
+from magnitude import calculate_epicentral_distance, calculate_ml
 
 
 def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
@@ -30,16 +29,12 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
     if len(zs) == 0:
         raise RuntimeError("Vertical component missing")
 
-    # prefer the band/instrument code the user typed (e.g. "BH"), else take the first Z found
     wanted = station["cha"][:2]
     z_ref = next((t for t in zs if t.stats.channel[:2] == wanted), zs[0])
     loc_ref = z_ref.stats.location
     band_ref = z_ref.stats.channel[:2]
 
-    # keep one location and one band/instrument code only
     st = st.select(location=loc_ref, channel=band_ref + "?")
-
-    # one Z + two horizontals (N/E preferred, otherwise 1/2)
     horiz = st.select(component="N") + st.select(component="E")
 
     if len(horiz) < 2:
@@ -85,7 +80,6 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
 
 
 def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.0):
-    # Refine an approximate arrival using the AIC picker
     n = len(trace_data)
 
     i0 = max(1, approximate_idx - int(search_before * fs))
@@ -115,7 +109,6 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.
     refined_idx = i0 + local_idx
 
     return int(refined_idx)
-
 
 def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=2.0, aic_after=4.0):
     nsta = int(sta * fs)
@@ -155,7 +148,6 @@ def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=
 
 
 def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
-    """Detect S after P."""
     nsta = max(1, int(sta * fs))
     nlta = max(nsta + 1, int(lta * fs))
 
@@ -198,7 +190,6 @@ def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=4.0, max_sp_sec=120
         s_time_sta,
         trigger_value,
     )
-
 
 def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_trigger):
     t0 = z.stats.starttime
@@ -299,7 +290,6 @@ def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_t
         "s_sta_trigger": float(s_sta_trigger),
     }
 
-
 def latlon_to_xy(lat, lon, lat0, lon0):
     x = (lon - lon0) * 111.32 * np.cos(np.radians(lat0))
     y = (lat - lat0) * 110.574
@@ -310,7 +300,6 @@ def xy_to_latlon(x, y, lat0, lon0):
     lat = lat0 + y / 110.574
     lon = lon0 + x / (111.32 * np.cos(np.radians(lat0)))
     return lat, lon
-
 
 def locate_epicenter_lsq(obs, source_depth_km=0.0):
     n = len(obs)
@@ -335,16 +324,13 @@ def locate_epicenter_lsq(obs, source_depth_km=0.0):
     def resid(p):
         return np.hypot(p[0] - sx, p[1] - sy) - sr
 
-    # starting points
     starts = [np.array([sx.mean(), sy.mean()])]
 
-    # Linearised solution: subtract circle 1 from circles 2..N
     A = np.column_stack([2 * (sx[1:] - sx[0]), 2 * (sy[1:] - sy[0])])
     b = (sr[0]**2 - sr[1:]**2) + (sx[1:]**2 - sx[0]**2) + (sy[1:]**2 - sy[0]**2)
     if np.linalg.matrix_rank(A) == 2:
         starts.append(np.linalg.lstsq(A, b, rcond=None)[0])
 
-    # a few offset starts to avoid the mirror-image minimum
     spread = max(np.ptp(sx), np.ptp(sy), 10.0)
     for ang in np.linspace(0, 2 * np.pi, 6, endpoint=False):
         starts.append(starts[0] + 0.5 * spread * np.array([np.cos(ang), np.sin(ang)]))
@@ -362,35 +348,17 @@ def locate_epicenter_lsq(obs, source_depth_km=0.0):
 
     return float(lat_epi), float(lon_epi), rms, [float(r) for r in residuals]
 
-
 def _fig_to_png_b64(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=130)
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 
-
-def waveform_stalta_png(
-    name,
-    z,
-    env,
-    cft_p,
-    cft_s,
-    tp,
-    ts,
-    p_sta,
-    s_sta,
-    thr_on,
-    thr_off,
-    thr_on_s,
-    thr_off_s,
-):
+def waveform_stalta_png( name,z, env, cft_p, cft_s, tp, ts, p_sta, s_sta, thr_on, thr_off, thr_on_s, thr_off_s,):
     t = z.times("matplotlib")
 
-    # Change to 4 subplots so Envelope gets its own row
     fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 
-    # 1. Vertical Waveform
     axes[0].plot(t, z.data, color="black", lw=0.7, label="Vertical (Z)")
     axes[0].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", lw=1.2, label="P Pick")
     if ts is not None:
@@ -399,7 +367,6 @@ def waveform_stalta_png(
     axes[0].legend(loc="upper right", fontsize=8, framealpha=0.9)
     axes[0].set_title(f"{name} — Waveform & Triggers")
 
-    # 2. Horizontal Envelope
     axes[1].plot(t, env, color="#555555", lw=0.7, label="Horizontal Envelope")
     axes[1].axvline(tp.matplotlib_date, color="#2f6fed", ls="--", lw=1.2)
     if ts is not None:
@@ -407,7 +374,6 @@ def waveform_stalta_png(
     axes[1].set_ylabel("Horiz. Env")
     axes[1].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    # 3. P-wave STA/LTA
     axes[2].plot(t, cft_p, color="#2f6fed", lw=0.8, label="P STA/LTA")
     axes[2].axhline(thr_on, color="#1f9e6b", ls=":", lw=1, label=f"On ({thr_on})")
     axes[2].axhline(thr_off, color="#888888", ls=":", lw=1, label=f"Off ({thr_off})")
@@ -417,7 +383,6 @@ def waveform_stalta_png(
     axes[2].set_ylabel("STA/LTA (P)")
     axes[2].legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    # 4. S-wave STA/LTA
     axes[3].plot(t, cft_s, color="#d1432b", lw=0.8, label="S STA/LTA")
     axes[3].axhline(thr_on_s, color="#1f9e6b", ls=":", lw=1, label=f"On ({thr_on_s})")
     axes[3].axhline(thr_off_s, color="#888888", ls=":", lw=1, label=f"Off ({thr_off_s})")
@@ -486,36 +451,14 @@ def circle_map_png(obs, names, epicenter):
     return _fig_to_png_b64(fig)
 
 
-def run_location(
-    base_url,
-    stations,
-    start,
-    end,
-    fs=20.0,
-    fmin=1.0,
-    fmax=8.0,
-    wait_sec=30.0,
-    vp=6.0,
-    vs=3.5,
-    sta_p=1.0,
-    lta_p=10.0,
-    thr_on=3.5,
-    thr_off=1.5,
-    sta_s=1.0,
-    lta_s=8.0,
-    min_sp_sec=4.0,
-    max_sp_sec=50.0,
-    thr_on_s=2.5,
-    thr_off_s=1.0,
-    exclude_rejected=True,
-):
+def run_location( base_url, stations, start, end, fs=20.0, fmin=1.0, fmax=8.0, wait_sec=30.0, vp=6.0, vs=3.5, sta_p=1.0, lta_p=10.0, thr_on=3.5, thr_off=1.5, sta_s=1.0, lta_s=8.0, min_sp_sec=4.0, max_sp_sec=50.0, thr_on_s=2.5, thr_off_s=1.0, exclude_rejected=True):
     client = Client(base_url)
     k = vp * vs / (vp - vs)
 
     station_results = []
     obs = []
     names = []
-    used_entries = []   # station entries that actually went into the solution
+    used_entries = []
 
     for station in stations:
         name = f"{station['net']}.{station['sta']}"
@@ -561,7 +504,9 @@ def run_location(
                     "p_time": tp.isoformat(),
                     "s_time": ts.isoformat(),
                     "sp_diff": sp_diff,
-                    "distance_km": dist_km,
+                    "hypo_distance_km": dist_km,
+                    "_trace_starttime": z.stats.starttime,
+                    "_env": env,
                     "waveform_png": waveform_stalta_png(
                         name, z, env, cft_p, cft_s, tp, ts,
                         p_sta_time, s_sta_time,
@@ -592,31 +537,95 @@ def run_location(
             lat_epi, lon_epi, rms, residuals = locate_epicenter_lsq(obs)
 
             origin_times = []
+            station_magnitudes = []
+
             for entry, res in zip(used_entries, residuals):
                 entry["residual_km"] = res
                 origin_times.append(
-                    UTCDateTime(entry["p_time"]) - entry["distance_km"] / vp
+                    UTCDateTime(entry["p_time"]) - entry["hypo_distance_km"] / vp
                 )
+
+                # Calculate Epicentral Distance using solved epicenter
+                epi_dist = calculate_epicentral_distance(
+                    entry["lat"], entry["lon"], lat_epi, lon_epi
+                )
+                entry["epicentral_distance_km"] = epi_dist
+
+                # Extract peak amplitude (A) and period (T) from the horizontal envelope
+                trace_env = entry.get("_env")
+                trace_t0 = entry.get("_trace_starttime")
+
+                if trace_env is not None and trace_t0 is not None:
+                    s_idx = int((UTCDateTime(entry["s_time"]) - trace_t0) * fs)
+                    window_samples = int(2.0 * fs)
+                    s_win = trace_env[max(0, s_idx): min(len(trace_env), s_idx + window_samples)]
+
+                    if len(s_win) > 0:
+                        peak_amp = float(np.max(s_win))  # m/s
+                        peak_loc = np.argmax(s_win)
+
+                        peak_amp_nms = peak_amp * 1e9  # nm/s
+                        period = 0.2  # Fallback period in seconds
+                        try:
+                            win_center = max(0, s_idx) + peak_loc
+                            half_w = int(0.5 * fs)
+                            sub_seg = trace_env[max(0, win_center - half_w): min(len(trace_env), win_center + half_w)]
+                            zero_crossings = np.where(np.diff(np.signbit(sub_seg - np.mean(sub_seg))))[0]
+                            if len(zero_crossings) >= 2:
+                                period = float(2.0 * (zero_crossings[1] - zero_crossings[0]) / fs)
+                                period = max(0.05, min(period, 2.0))
+                        except Exception:
+                            pass
+
+                        # Calculate ML
+                        ml_val = calculate_ml(
+                            amplitude=peak_amp_nms,
+                            period=period,
+                            delta_km=epi_dist,
+                            station_correction=0.0,
+                        )
+                        entry["amplitude"] = peak_amp_nms
+                        entry["period"] = period
+                        entry["ml"] = round(ml_val, 2)
+                        station_magnitudes.append(ml_val)
+
+            # Strip out non-serializable private trace arrays before returning JSON
+            for s in station_results:
+                s.pop("_trace_starttime", None)
+                s.pop("_env", None)
 
             avg_origin_time = UTCDateTime(
                 float(np.mean([t.timestamp for t in origin_times]))
             ).isoformat()
 
+            network_ml = float(np.mean(station_magnitudes)) if station_magnitudes else None
+
             return {
                 "located": True,
                 "epicenter": {"lat": lat_epi, "lon": lon_epi},
+                "magnitude_ml": round(network_ml, 2) if network_ml is not None else None,
                 "rms_km": rms,
                 "n_stations_used": len(obs),
                 "origin_time": avg_origin_time,
                 "circle_map_png": circle_map_png(obs, names, (lat_epi, lon_epi)),
                 "stations": station_results,
             }
+
         except Exception as e:
+            # Clean temporary variables on failure
+            for s in station_results:
+                s.pop("_trace_starttime", None)
+                s.pop("_env", None)
             return {
                 "located": False,
                 "error": f"Trilateration failed: {e}",
                 "stations": station_results,
             }
+
+    # Clean temporary variables if less than 3 usable picks
+    for s in station_results:
+        s.pop("_trace_starttime", None)
+        s.pop("_env", None)
 
     return {
         "located": False,
