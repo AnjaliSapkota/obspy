@@ -8,6 +8,10 @@ from obspy.clients.fdsn import Client
 from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows
 from scipy.optimize import least_squares
 from pyproj import Transformer
+from obspy.taup import TauPyModel
+
+# Initialize the built-in ak135 global reference model
+taup_model = TauPyModel(model="ak135")
 
 # FDSN client
 client = Client("https://seiscomp.alertnepal.online")
@@ -243,8 +247,8 @@ def predicted_lag(x, y, v, station_xy, a, b):
 def invert_location_velocity(
     station_xy,
     lag_pairs,            # list of (station_a, station_b, lag_seconds, cc_max)
-    v_min=1.0,
-    v_max=3.5,
+    v_min,
+    v_max,
     v_step=0.025,
     grid_step_km=2.0,
     margin_km=100.0,
@@ -310,20 +314,22 @@ def invert_location_velocity(
     }
 
 
+
 def run_triangulation(
     stations,
     start,
     end,
-    fs=20.0,
-    fmin=1.0,
-    fmax=8.0,
-    smooth_cutoff=0.5,
-    max_shift_seconds=50.0,
-    v_min=1.0,
-    v_max=3.5,
+    v_min,
+    v_max,
+    fs,
+    fmin,
+    fmax,
+    smooth_cutoff,
+    max_shift_seconds,
     v_step=0.025,
     grid_step_km=2.0,
 ):
+
     if len(stations) != 3:
         raise ValueError("This method needs exactly 3 stations.")
 
@@ -426,6 +432,14 @@ def run_triangulation(
         s["sta"]: {"lat": s["lat"], "lon": s["lon"]} for s in stations
     }
 
+    # Generate aligned envelope visualization
+    pairs_lag_map = {
+        f"{station_a}-{station_b}": lag_ab["lag"],
+        f"{station_a}-{station_c}": lag_ac["lag"],
+        f"{station_b}-{station_c}": lag_bc["lag"]
+    }
+    aligned_plot = create_aligned_envelope_plot(envelopes, pairs_lag_map, fs)
+    
     return {
         "pairs": pairs,
         "closure_error": float(closure_error),
@@ -442,6 +456,7 @@ def run_triangulation(
         "spectrogram_plot": spectrogram_plot,
         "plot_png": plot_png,
         "velocity_plot": velocity_plot,
+        "aligned_plot": aligned_plot,
         "settings": {
             "start": str(start),
             "end": str(end),
@@ -454,29 +469,68 @@ def run_triangulation(
             "v_max": float(v_max),
             "v_step": float(v_step),
             "grid_step_km": float(grid_step_km),
+            
         },
+        
     }
 
+def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
+    fig, ax = plt.subplots(figsize=(12, 5))
+    
+    names = list(envelopes.keys())
+    ref_name = names[0]
+    
+    # Peak-normalize reference envelope
+    ref_env = envelopes[ref_name]
+    ref_max = np.max(ref_env)
+    ref_env_norm = ref_env / ref_max if ref_max > 0 else ref_env
+    time_ref = np.arange(len(ref_env_norm)) / sampling_rate
+    
+    ax.plot(time_ref, ref_env_norm, label=f"{ref_name} (Reference)", linewidth=1.5, color="black")
+    
+    colors = ["blue", "green", "purple", "orange"]
+    for i, name in enumerate(names[1:]):
+        env = envelopes[name]
+        env_max = np.max(env)
+        env_norm = env / env_max if env_max > 0 else env
+        time_env = np.arange(len(env_norm)) / sampling_rate
+        
+        lag_val = 0.0
+        for pair, l_val in lags.items():
+            if name in pair and ref_name in pair:
+                lag_val = l_val if pair.startswith(ref_name) else -l_val
+                break
+                
+        shifted_time = time_env - lag_val
+        ax.plot(shifted_time, env_norm, label=f"{name} (shifted by {lag_val:+.2f}s)", 
+                linewidth=1.2, alpha=0.8, color=colors[i % len(colors)])
 
-# Run directly from Python
-if __name__ == "__main__":
-    stations = [
-        {"sta": "KKN", "lat": 27.8000, "lon": 85.2790, "net": "NK", "cha": "BHZ", "loc": "*"},
-        {"sta": "EVN", "lat": 27.95865, "lon": 86.811653, "net": "IO", "cha": "BHZ", "loc": "*"},
-        {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
-    ]
+    ax.set_title("Normalized Hilbert Envelopes Aligned by TDOA Lags")
+    ax.set_xlabel("Reference Time (seconds)")
+    ax.set_ylabel("Normalized Amplitude")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    return image_to_base64(fig)
+#  Run directly from Python
+# if __name__ == "__main__":
+#     stations = [
+#         {"sta": "KKN", "lat": 27.8000, "lon": 85.2790, "net": "NK", "cha": "BHZ", "loc": "*"},
+#         {"sta": "EVN", "lat": 27.95865, "lon": 86.811653, "net": "IO", "cha": "BHZ", "loc": "*"},
+#         {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
+#     ]
 
-    result = run_triangulation(
-        stations=stations,
-        start="2026-08-26T02:52:00",
-        end="2026-08-26T02:56:00",
-        fs=20.0,
-        fmin=1.0,
-        fmax=8.0,
-        smooth_cutoff=0.5,
-        max_shift_seconds=30.0,
-        v_min=1.0,
-        v_max=3.5,
-    )
+#     result = run_triangulation(
+#         stations=stations,
+#         start="2026-08-26T02:52:00",
+#         end="2026-08-26T02:56:00",
+#         fs=20.0,
+#         fmin=1.0,
+#         fmax=8.0,
+#         smooth_cutoff=0.5,
+#         max_shift_seconds=30.0,
+#         v_min=1.0,
+#         v_max=4.0,
+#     )
 
-    print("\nAnalysis completed.")
+#     print("\nAnalysis completed.")

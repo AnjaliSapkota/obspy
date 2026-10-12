@@ -14,11 +14,13 @@ STA_STATIONS = [
     {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
 ]
 
+
 TDOA_STATIONS = [
-    {"sta": "KKN",   "net": "NK", "loc": "*", "cha": "BHZ", "lat": 27.8000,   "lon": 85.2790},
-    {"sta": "EVN",   "net": "IO", "loc": "*", "cha": "BHZ", "lat": 27.95865,  "lon": 86.811653},
-    {"sta": "EQM10", "net": "NP", "loc": "*", "cha": "EHZ", "lat": 28.299517, "lon": 83.960148},
+    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
+    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
+    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
 ]
+
 
 _coord_cache = {}
 
@@ -273,8 +275,8 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
   <h2 style="margin-top:14px">Stations (exactly 3)</h2>
   <div id="stations_t"></div>
 
-  <label>Start (UTC)</label><input type="text" id="t_start" value="2026-08-26T02:52:00">
-  <label>End (UTC)</label><input type="text" id="t_end" value="2026-08-26T02:56:00">
+  <label>Start (UTC)</label><input type="text" id="t_start" placeholder="YYYY-MM-DDTHH:MM:SS">
+  <label>End (UTC)</label><input type="text" id="t_end" placeholder="YYYY-MM-DDTHH:MM:SS">
   <div class="row"><div><label>Band low (Hz)</label><input type="number" id="t_fmin" value="1.0" step="0.1"></div>
   <div><label>Band high (Hz)</label><input type="number" id="t_fmax" value="8" step="0.1"></div></div>
   <div class="row"><div><label>Sample rate (Hz)</label><input type="number" id="t_fs" value="20" step="1"></div>
@@ -282,8 +284,8 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
 
   <div class="row"><div><label>Max lag (s)</label><input type="number" id="t_max_shift" value="30"></div>
   <div></div></div>
-  <div class="row"><div><label>Min velocity (km/s)</label><input type="number" id="t_v_min" value="1.0" step="0.1"></div>
-  <div><label>Max velocity (km/s)</label><input type="number" id="t_v_max" value="3.5" step="0.1"></div></div>
+  <div class="row"><div><label>Min velocity (km/s)</label><input type="number" id="t_v_min" placeholder="Enter minimum" min="0" step="0.1"></div>
+  <div><label>Max velocity (km/s)</label><input type="number" id="t_v_max" placeholder="Enter maximum" min="0" step="0.1"></div></div>
 
   <button class="go" id="go_t" onclick="runTdoa()">Triangulate</button>
   <div class="status" id="status_t"></div>
@@ -297,6 +299,7 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
     <div class="plot-section"><h2>Frequency spectrogram</h2><img id="sp_t" class="plot" alt="Spectrogram"></div>
     <div class="plot-section"><h2>Hyperbola intersection</h2><img id="hyp_t" class="plot" alt="TDOA hyperbolas"></div>
     <div class="plot-section"><h2>Misfit vs. velocity</h2><img id="vel_t" class="plot" alt="Velocity misfit"></div>
+    <div class="plot-section"><h2>Aligned Hilbert envelopes</h2><img id="aligned_t" class="plot" alt="Aligned Envelopes"></div>
   </div>
   <div class="panel result" id="ccs_t">
     <h2>Envelope cross-correlation</h2>
@@ -547,7 +550,8 @@ function showTdoa(d){
   document.getElementById('sp_t').src = 'data:image/png;base64,' + d.spectrogram_plot;
   document.getElementById('hyp_t').src = 'data:image/png;base64,' + d.plot_png;
   document.getElementById('vel_t').src = 'data:image/png;base64,' + d.velocity_plot;
-
+  document.getElementById('aligned_t').src = 'data:image/png;base64,' + d.aligned_plot;
+  
   const box = document.getElementById('ccplots_t'); box.innerHTML = '';
   d.pairs.forEach((p,i) => {
     const div = document.createElement('div'); div.className = 'cc'; box.appendChild(div);
