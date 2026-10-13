@@ -7,22 +7,22 @@ from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows
 from scipy.optimize import least_squares
-from pyproj import Transformer
+from pyproj import Transformer, Geod
 from obspy.taup import TauPyModel
 
-# Initialize the built-in ak135 global reference model
+# Initialize the built-in ak135 global reference model and Geodetic calculator
 taup_model = TauPyModel(model="ak135")
+geod = Geod(ellps="WGS84")
 
 # FDSN client
 client = Client("https://seiscomp.alertnepal.online")
 
-# UTM projection for Nepal (Zone 45N, EPSG:32645)
+# UTM projection for plotting & local coordinate conversion (Zone 45N, EPSG:32645)
 transformer_to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
 transformer_to_wgs = Transformer.from_crs("EPSG:32645", "EPSG:4326", always_xy=True)
 
-def fetch_waveform(station,start,end,target_fs,freqmin,freqmax):
-    stream = client.get_waveforms(network=station["net"],station=station["sta"],location=station["loc"],channel=station["cha"],starttime=start,endtime=end)
-
+def fetch_waveform(station, start, end, target_fs, freqmin, freqmax):
+    stream = client.get_waveforms(network=station["net"], station=station["sta"], location=station["loc"], channel=station["cha"], starttime=start, endtime=end)
 
     if len(stream) == 0:
         raise RuntimeError(f"No {station['sta']} waveform found.")
@@ -114,7 +114,6 @@ def create_hyperbola_plot(station_xy, delta, source_xy):
     colors = ["blue", "red", "green"]
     legend_lines = []
 
-    # delta[a-b] = d_b - d_a
     for i, (pair, dist_diff) in enumerate(delta.items()):
         station_a, station_b = pair.split("-")
         H = D[station_b] - D[station_a] - dist_diff
@@ -183,7 +182,6 @@ def calculate_envelope_lag(envelope_a, envelope_b, sampling_rate, max_shift_seco
     envelope_a = envelope_a[:min_len]
     envelope_b = envelope_b[:min_len]
 
-    # Remove 5% from both edges
     crop = int(0.05 * min_len)
     if crop > 0:
         envelope_a = envelope_a[crop:-crop]
@@ -236,45 +234,38 @@ def xy_to_latlon(origin_lat, origin_lon, x_km, y_km):
     return lat, lon
 
 
-def predicted_lag(x, y, v, station_xy, a, b):
-    xa, ya = station_xy[a]
-    xb, yb = station_xy[b]
-    d_a = np.hypot(x - xa, y - ya)
-    d_b = np.hypot(x - xb, y - yb)
-    return (d_a - d_b) / v
-
-
-def invert_location_velocity(
-    station_xy,
-    lag_pairs,            # list of (station_a, station_b, lag_seconds, cc_max)
+def invert_location_velocity_geod(
+    station_latlon,
+    lag_pairs,
     v_min,
     v_max,
     v_step=0.025,
-    grid_step_km=2.0,
-    margin_km=100.0,
+    grid_step_deg=0.015,
+    margin_deg=2.5,
 ):
-    """Grid search over (x, y, v) followed by least-squares refinement."""
-
-    xs = [p[0] for p in station_xy.values()]
-    ys = [p[1] for p in station_xy.values()]
-    x_range = np.arange(min(xs) - margin_km, max(xs) + margin_km, grid_step_km)
-    y_range = np.arange(min(ys) - margin_km, max(ys) + margin_km, grid_step_km)
+    """Grid search over geographic (lat, lon, v) using true geodetic distances followed by least-squares refinement."""
+    lats = [coord[0] for coord in station_latlon.values()]
+    lons = [coord[1] for coord in station_latlon.values()]
+    
+    lat_range = np.arange(min(lats) - margin_deg, max(lats) + margin_deg, grid_step_deg)
+    lon_range = np.arange(min(lons) - margin_deg, max(lons) + margin_deg, grid_step_deg)
     v_range = np.arange(v_min, v_max + v_step, v_step)
 
-    X, Y = np.meshgrid(x_range, y_range, indexing="ij")
+    LatGrid, LonGrid = np.meshgrid(lat_range, lon_range, indexing="ij")
 
-    D = {
-        name: np.hypot(X - sx, Y - sy)
-        for name, (sx, sy) in station_xy.items()
-    }
+    # Precompute true geodetic distances from all grid nodes to each station (in km)
+    D_km = {}
+    for name, (s_lat, s_lon) in station_latlon.items():
+        _, _, dist_m = geod.inv(LonGrid, LatGrid, np.full_like(LonGrid, s_lon), np.full_like(LatGrid, s_lat))
+        D_km[name] = dist_m / 1000.0
 
     best = {"misfit": np.inf}
     misfit_vs_v = []
 
     for v in v_range:
-        total = np.zeros_like(X)
+        total = np.zeros_like(LatGrid)
         for a, b, lag, cc in lag_pairs:
-            pred = (D[a] - D[b]) / v
+            pred = (D_km[a] - D_km[b]) / v
             total += max(cc, 0.0) * (lag - pred) ** 2
         misfit = np.sqrt(total)
 
@@ -284,35 +275,37 @@ def invert_location_velocity(
         if misfit[idx] < best["misfit"]:
             best = {
                 "misfit": float(misfit[idx]),
-                "x": float(x_range[idx[0]]),
-                "y": float(y_range[idx[1]]),
+                "lat": float(lat_range[idx[0]]),
+                "lon": float(lon_range[idx[1]]),
                 "v": float(v),
             }
 
     def residuals(p):
-        x, y, v = p
-        return [
-            np.sqrt(max(cc, 0.0)) * (lag - predicted_lag(x, y, v, station_xy, a, b))
-            for a, b, lag, cc in lag_pairs
-        ]
+        lat, lon, v = p
+        res = []
+        for a, b, lag, cc in lag_pairs:
+            _, _, da_m = geod.inv(lon, lat, station_latlon[a][1], station_latlon[a][0])
+            _, _, db_m = geod.inv(lon, lat, station_latlon[b][1], station_latlon[b][0])
+            pred = ((da_m - db_m) / 1000.0) / v
+            res.append(np.sqrt(max(cc, 0.0)) * (lag - pred))
+        return res
 
     refined = least_squares(
         residuals,
-        [best["x"], best["y"], best["v"]],
-        bounds=([-np.inf, -np.inf, v_min], [np.inf, np.inf, v_max]),
+        [best["lat"], best["lon"], best["v"]],
+        bounds=([min(lat_range), min(lon_range), v_min], [max(lat_range), max(lon_range), v_max]),
     )
-    x_ref, y_ref, v_ref = refined.x
+    lat_ref, lon_ref, v_ref = refined.x
 
     return {
-        "x_km": float(x_ref),
-        "y_km": float(y_ref),
+        "lat": float(lat_ref),
+        "lon": float(lon_ref),
         "velocity": float(v_ref),
         "residual_norm": float(np.linalg.norm(refined.fun)),
         "grid_best": best,
         "v_range": v_range.tolist(),
         "misfit_vs_v": misfit_vs_v,
     }
-
 
 
 def run_triangulation(
@@ -327,7 +320,7 @@ def run_triangulation(
     smooth_cutoff,
     max_shift_seconds,
     v_step=0.025,
-    grid_step_km=2.0,
+    grid_step_deg=0.015,
 ):
 
     if len(stations) != 3:
@@ -336,7 +329,6 @@ def run_triangulation(
     start = UTCDateTime(start)
     end = UTCDateTime(end)
 
-    # Fetch waveforms
     print("Fetching waveforms")
     traces = {}
     for station in stations:
@@ -350,7 +342,6 @@ def run_triangulation(
     waveform_plot = create_waveform_plot(traces)
     spectrogram_plot = create_spectrogram_plot(traces, fmin=fmin, fmax=fmax)
 
-    # Envelopes
     print("Calculating Hilbert envelopes")
     envelopes = {name: get_hilbert_envelope(tr, smooth_cutoff) for name, tr in traces.items()}
 
@@ -358,7 +349,6 @@ def run_triangulation(
     station_b = stations[1]["sta"]
     station_c = stations[2]["sta"]
 
-    # Pairwise TDOA
     print("Calculating TDOA")
     lag_ab = calculate_envelope_lag(envelopes[station_a], envelopes[station_b], fs, max_shift_seconds)
     lag_ac = calculate_envelope_lag(envelopes[station_a], envelopes[station_c], fs, max_shift_seconds)
@@ -366,52 +356,53 @@ def run_triangulation(
 
     closure_error = lag_ac["lag"] - (lag_ab["lag"] + lag_bc["lag"])
 
-    print("\nHilbert Envelope TDOA results:")
+    print(f"\nHilbert Envelope TDOA results:")
     print(f"{station_a} - {station_b}: lag = {lag_ab['lag']:+.3f} s, CC = {lag_ab['cc_max']:.3f}")
     print(f"{station_a} - {station_c}: lag = {lag_ac['lag']:+.3f} s, CC = {lag_ac['cc_max']:.3f}")
     print(f"{station_b} - {station_c}: lag = {lag_bc['lag']:+.3f} s, CC = {lag_bc['cc_max']:.3f}")
     print(f"\nTDOA closure error: {closure_error:+.3f} s")
 
-    # Station coordinates (first station = origin)
     origin_lat = stations[0]["lat"]
     origin_lon = stations[0]["lon"]
-    station_xy = {
-        s["sta"]: latlon_to_xy(origin_lat, origin_lon, s["lat"], s["lon"])
-        for s in stations
+    
+    station_latlon = {
+        s["sta"]: (s["lat"], s["lon"]) for s in stations
     }
 
-    # Joint location + velocity inversion
-    print("\nRunning joint inversion for location and velocity")
+    print("\nRunning geodetic joint inversion for location and velocity")
     lag_pairs = [
         (station_a, station_b, lag_ab["lag"], lag_ab["cc_max"]),
         (station_a, station_c, lag_ac["lag"], lag_ac["cc_max"]),
         (station_b, station_c, lag_bc["lag"], lag_bc["cc_max"]),
     ]
 
-    inv = invert_location_velocity(
-        station_xy,
+    inv = invert_location_velocity_geod(
+        station_latlon,
         lag_pairs,
         v_min=v_min,
         v_max=v_max,
         v_step=v_step,
-        grid_step_km=grid_step_km,
+        grid_step_deg=grid_step_deg,
     )
 
-    x_src = inv["x_km"]
-    y_src = inv["y_km"]
+    source_lat = inv["lat"]
+    source_lon = inv["lon"]
     velocity = inv["velocity"]
     residual_norm = inv["residual_norm"]
 
-    source_lat, source_lon = xy_to_latlon(origin_lat, origin_lon, x_src, y_src)
+    # Convert lat/lon back to UTM relative to origin for plotting compatibility
+    x_src, y_src = latlon_to_xy(origin_lat, origin_lon, source_lat, source_lon)
 
-    print(f"X (East)  : {x_src:+.3f} km")
-    print(f"Y (North) : {y_src:+.3f} km")
-    print(f"Velocity  : {velocity:.3f} km/s")
-    print(f"Residual  : {residual_norm:.4f} s")
+    station_xy = {
+        s["sta"]: latlon_to_xy(origin_lat, origin_lon, s["lat"], s["lon"])
+        for s in stations
+    }
+
     print(f"Latitude  : {source_lat:.6f}")
     print(f"Longitude : {source_lon:.6f}")
+    print(f"Velocity  : {velocity:.3f} km/s")
+    print(f"Residual  : {residual_norm:.4f} s")
 
-    # Distance differences using estimated velocity: d_b - d_a = -v * lag
     delta = {
         f"{station_a}-{station_b}": -velocity * lag_ab["lag"],
         f"{station_a}-{station_c}": -velocity * lag_ac["lag"],
@@ -432,7 +423,6 @@ def run_triangulation(
         s["sta"]: {"lat": s["lat"], "lon": s["lon"]} for s in stations
     }
 
-    # Generate aligned envelope visualization
     pairs_lag_map = {
         f"{station_a}-{station_b}": lag_ab["lag"],
         f"{station_a}-{station_c}": lag_ac["lag"],
@@ -468,10 +458,7 @@ def run_triangulation(
             "v_min": float(v_min),
             "v_max": float(v_max),
             "v_step": float(v_step),
-            "grid_step_km": float(grid_step_km),
-            
         },
-        
     }
 
 def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
@@ -480,7 +467,6 @@ def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
     names = list(envelopes.keys())
     ref_name = names[0]
     
-    # Peak-normalize reference envelope
     ref_env = envelopes[ref_name]
     ref_max = np.max(ref_env)
     ref_env_norm = ref_env / ref_max if ref_max > 0 else ref_env
@@ -512,25 +498,3 @@ def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
     ax.legend(loc="upper right")
     fig.tight_layout()
     return image_to_base64(fig)
-#  Run directly from Python
-# if __name__ == "__main__":
-#     stations = [
-#         {"sta": "KKN", "lat": 27.8000, "lon": 85.2790, "net": "NK", "cha": "BHZ", "loc": "*"},
-#         {"sta": "EVN", "lat": 27.95865, "lon": 86.811653, "net": "IO", "cha": "BHZ", "loc": "*"},
-#         {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
-#     ]
-
-#     result = run_triangulation(
-#         stations=stations,
-#         start="2026-08-26T02:52:00",
-#         end="2026-08-26T02:56:00",
-#         fs=20.0,
-#         fmin=1.0,
-#         fmax=8.0,
-#         smooth_cutoff=0.5,
-#         max_shift_seconds=30.0,
-#         v_min=1.0,
-#         v_max=4.0,
-#     )
-
-#     print("\nAnalysis completed.")
