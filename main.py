@@ -277,9 +277,9 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
 
   <label>Start (UTC)</label><input type="text" id="t_start" placeholder="YYYY-MM-DDTHH:MM:SS">
   <label>End (UTC)</label><input type="text" id="t_end" placeholder="YYYY-MM-DDTHH:MM:SS">
-  <div class="row"><div><label>Band low (Hz)</label><input type="number" id="t_fmin" value="1.0" step="0.1"></div>
-  <div><label>Band high (Hz)</label><input type="number" id="t_fmax" value="8" step="0.1"></div></div>
-  <div class="row"><div><label>Sample rate (Hz)</label><input type="number" id="t_fs" value="20" step="1"></div>
+  <div class="row"><div><label>Band low (Hz)</label><input type="number" id="t_fmin" step="1"></div>
+  <div><label>Band high (Hz)</label><input type="number" id="t_fmax" step="1"></div></div>
+  <div class="row"><div><label>Sample rate (Hz)</label><input type="number" id="t_fs" step="1"></div>
   <div><label>Envelope smooth cutoff (Hz)</label><input type="number" id="t_smooth_cutoff" value="0.5" step="0.1"></div></div>
 
   <div class="row"><div><label>Max lag (s)</label><input type="number" id="t_max_shift" value="30"></div>

@@ -62,13 +62,13 @@ def create_waveform_plot(traces):
         ax.set_ylabel(name)
         ax.grid(True, alpha=0.3)
 
-    axes[-1].set_xlabel("Time since common start (seconds)")
-    fig.suptitle("Three-Station Seismic Waveforms")
+    axes[-1].set_xlabel("Time (seconds)")
+    fig.suptitle("Seismic Waveforms")
     fig.tight_layout()
     return image_to_base64(fig)
 
 
-def create_spectrogram_plot(traces, fmin=1.0, fmax=8.0):
+def create_spectrogram_plot(traces, fmin, fmax):
     fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
     for ax, (name, trace) in zip(axes, traces.items()):
         data = trace.data.astype(float)
@@ -86,56 +86,79 @@ def create_spectrogram_plot(traces, fmin=1.0, fmax=8.0):
         ax.set_ylim(fmin, fmax)
         ax.grid(True, alpha=0.2)
 
-    axes[-1].set_xlabel("Time since common start (seconds)")
-    fig.suptitle(f"Three-Station Frequency Spectrogram ({fmin:g}–{fmax:g} Hz)")
+    axes[-1].set_xlabel("Time (seconds)")
+    fig.suptitle(f"Frequency Spectrogram ({fmin:g}–{fmax:g} Hz)")
     fig.tight_layout()
     return image_to_base64(fig)
 
 
-def create_hyperbola_plot(station_xy, delta, source_xy):
+
+def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_lat, origin_lon,):
     xs = [xy[0] for xy in station_xy.values()]
     ys = [xy[1] for xy in station_xy.values()]
 
     all_x = xs + [source_xy[0]]
     all_y = ys + [source_xy[1]]
-    margin = max(max(all_x) - min(all_x), max(all_y) - min(all_y)) * 0.2 + 50.0
+
+    margin = max( max(all_x) - min(all_x), max(all_y) - min(all_y),) * 0.2 + 50.0
+
     xmin, xmax = min(all_x) - margin, max(all_x) + margin
     ymin, ymax = min(all_y) - margin, max(all_y) + margin
 
     resolution = 0.5
-    X, Y = np.meshgrid(np.arange(xmin, xmax, resolution), np.arange(ymin, ymax, resolution))
 
-    D = {
-        name: np.sqrt((X - sx) ** 2 + (Y - sy) ** 2)
-        for name, (sx, sy) in station_xy.items()
-    }
+    X, Y = np.meshgrid(np.arange(xmin, xmax, resolution),np.arange(ymin, ymax, resolution))
+
+    # Convert the UTM grid from kilometres to geographic coordinates.
+    ox, oy = transformer_to_utm.transform(origin_lon, origin_lat)
+
+    grid_lon, grid_lat = transformer_to_wgs.transform(ox + X * 1000.0,oy + Y * 1000.0,)
+
+    # Calculate geodesic distances from every grid point to each station.
+    D = {}
+
+    for name, (s_lat, s_lon) in station_latlon.items():
+        _, _, dist_m = geod.inv(
+            grid_lon,
+            grid_lat,
+            np.full_like(grid_lon, s_lon),
+            np.full_like(grid_lat, s_lat),
+        )
+
+        D[name] = dist_m / 1000.0
 
     fig, ax = plt.subplots(figsize=(10, 8))
+
     colors = ["blue", "red", "green"]
     legend_lines = []
 
     for i, (pair, dist_diff) in enumerate(delta.items()):
         station_a, station_b = pair.split("-")
+
         H = D[station_b] - D[station_a] - dist_diff
+
         ax.contour(X, Y, H, levels=[0], colors=colors[i], linewidths=2.5)
-        legend_lines.append(
-            Line2D([0], [0], color=colors[i], linewidth=2.5,
-                   label=f"{station_a}–{station_b} hyperbola")
-        )
+
+        legend_lines.append(Line2D([0], [0], color=colors[i % len(colors)], linewidth=2.5, label=f"{station_a}–{station_b} hyperbola", ))
 
     for name, (sx, sy) in station_xy.items():
         ax.scatter(sx, sy, marker=".", s=160, zorder=5)
         ax.text(sx + 5, sy + 5, name, fontsize=12, fontweight="bold")
 
-    legend_lines.append(
-        Line2D([0], [0], marker=".", color="black", linestyle="None",
-               markersize=10, label="Station")
-    )
+    legend_lines.append(Line2D([0], [0], marker=".", color="black", linestyle="None",markersize=10, label="Station"))
 
     ax.scatter(source_xy[0], source_xy[1], marker="*", s=300, zorder=10)
+
     legend_lines.append(
-        Line2D([0], [0], marker="*", color="black", linestyle="None",
-               markersize=15, label="Estimated source")
+        Line2D(
+            [0],
+            [0],
+            marker="*",
+            color="black",
+            linestyle="None",
+            markersize=15,
+            label="Estimated source",
+        )
     )
 
     ax.legend(handles=legend_lines, loc="best")
@@ -145,7 +168,9 @@ def create_hyperbola_plot(station_xy, delta, source_xy):
     ax.grid(True)
     ax.axis("equal")
     fig.tight_layout()
+
     return image_to_base64(fig)
+
 
 
 def create_velocity_plot(inv):
@@ -164,7 +189,7 @@ def create_velocity_plot(inv):
     return image_to_base64(fig)
 
 
-def get_hilbert_envelope(trace, smooth_cutoff=0.5):
+def get_hilbert_envelope(trace, smooth_cutoff):
     signal = trace.data.astype(float)
     signal = signal - np.mean(signal)
     envelope = np.abs(hilbert(signal))
@@ -253,7 +278,6 @@ def invert_location_velocity_geod(
 
     LatGrid, LonGrid = np.meshgrid(lat_range, lon_range, indexing="ij")
 
-    # Precompute true geodetic distances from all grid nodes to each station (in km)
     D_km = {}
     for name, (s_lat, s_lon) in station_latlon.items():
         _, _, dist_m = geod.inv(LonGrid, LatGrid, np.full_like(LonGrid, s_lon), np.full_like(LatGrid, s_lat))
@@ -322,13 +346,15 @@ def run_triangulation(
     v_step=0.025,
     grid_step_deg=0.015,
 ):
-
     if len(stations) != 3:
         raise ValueError("This method needs exactly 3 stations.")
 
     start = UTCDateTime(start)
     end = UTCDateTime(end)
-
+    
+    if end <= start:
+        raise ValueError("End time must be after start time.")
+    
     print("Fetching waveforms")
     traces = {}
     for station in stations:
@@ -390,7 +416,6 @@ def run_triangulation(
     velocity = inv["velocity"]
     residual_norm = inv["residual_norm"]
 
-    # Convert lat/lon back to UTM relative to origin for plotting compatibility
     x_src, y_src = latlon_to_xy(origin_lat, origin_lon, source_lat, source_lon)
 
     station_xy = {
@@ -410,7 +435,7 @@ def run_triangulation(
     }
 
     print("Creating hyperbola and velocity plots")
-    plot_png = create_hyperbola_plot(station_xy, delta, (x_src, y_src))
+    plot_png = create_hyperbola_plot(station_xy, station_latlon, delta, (x_src, y_src), origin_lat, origin_lon,)
     velocity_plot = create_velocity_plot(inv)
 
     pairs = [
@@ -487,7 +512,7 @@ def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
                 lag_val = l_val if pair.startswith(ref_name) else -l_val
                 break
                 
-        shifted_time = time_env - lag_val
+        shifted_time = time_env + lag_val
         ax.plot(shifted_time, env_norm, label=f"{name} (shifted by {lag_val:+.2f}s)", 
                 linewidth=1.2, alpha=0.8, color=colors[i % len(colors)])
 
