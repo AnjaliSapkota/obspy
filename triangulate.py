@@ -5,19 +5,18 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows
+from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows, welch
 from scipy.optimize import least_squares
 from pyproj import Transformer, Geod
 from obspy.taup import TauPyModel
+from frequency import analyze_spectral_features, create_spectral_feature_plot
 
-# Initialize the built-in ak135 global reference model and Geodetic calculator
 taup_model = TauPyModel(model="ak135")
-geod = Geod(ellps="WGS84")
 
 # FDSN client
 client = Client("https://seiscomp.alertnepal.online")
 
-# UTM projection for plotting & local coordinate conversion (Zone 45N, EPSG:32645)
+geod = Geod(ellps="WGS84")
 transformer_to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
 transformer_to_wgs = Transformer.from_crs("EPSG:32645", "EPSG:4326", always_xy=True)
 
@@ -100,12 +99,12 @@ def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_l
     all_x = xs + [source_xy[0]]
     all_y = ys + [source_xy[1]]
 
-    margin = max( max(all_x) - min(all_x), max(all_y) - min(all_y),) * 0.2 + 50.0
+    margin = max( max(all_x) - min(all_x), max(all_y) - min(all_y),) * 2 + 50.0
 
     xmin, xmax = min(all_x) - margin, max(all_x) + margin
     ymin, ymax = min(all_y) - margin, max(all_y) + margin
 
-    resolution = 0.5
+    resolution = 1
 
     X, Y = np.meshgrid(np.arange(xmin, xmax, resolution),np.arange(ymin, ymax, resolution))
 
@@ -368,6 +367,26 @@ def run_triangulation(
     waveform_plot = create_waveform_plot(traces)
     spectrogram_plot = create_spectrogram_plot(traces, fmin=fmin, fmax=fmax)
 
+    print("Calculating spectral features")
+
+    spectral_features = analyze_spectral_features(
+        traces,
+        window_seconds=10.0,
+        step_seconds=5.0,
+        fmin= fmin,
+        fmax= fmax,
+    )
+
+    spectral_plot = None
+
+    if spectral_features:
+        print("Creating spectral feature plot")
+        spectral_plot = create_spectral_feature_plot(spectral_features)
+    else:
+        print("No usable spectral features were calculated.")
+
+    print(f"Calculated {len(spectral_features)} spectral feature windows.")
+
     print("Calculating Hilbert envelopes")
     envelopes = {name: get_hilbert_envelope(tr, smooth_cutoff) for name, tr in traces.items()}
 
@@ -469,6 +488,8 @@ def run_triangulation(
         "stations": station_coordinates,
         "waveform_plot": waveform_plot,
         "spectrogram_plot": spectrogram_plot,
+        "spectral_features": spectral_features,
+        "spectral_plot": spectral_plot,
         "plot_png": plot_png,
         "velocity_plot": velocity_plot,
         "aligned_plot": aligned_plot,
@@ -484,6 +505,7 @@ def run_triangulation(
             "v_max": float(v_max),
             "v_step": float(v_step),
         },
+
     }
 
 def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
@@ -523,3 +545,4 @@ def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
     ax.legend(loc="upper right")
     fig.tight_layout()
     return image_to_base64(fig)
+
