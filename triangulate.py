@@ -9,11 +9,11 @@ from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert,
 from scipy.optimize import least_squares
 from pyproj import Transformer, Geod
 from obspy.taup import TauPyModel
-from frequency import analyze_spectral_features, create_spectral_feature_plot
 
+
+# Import modularized frequency methods from freq.py
 taup_model = TauPyModel(model="ak135")
 
-# FDSN client
 client = Client("https://seiscomp.alertnepal.online")
 
 geod = Geod(ellps="WGS84")
@@ -91,31 +91,26 @@ def create_spectrogram_plot(traces, fmin, fmax):
     return image_to_base64(fig)
 
 
-
-def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_lat, origin_lon,):
+def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_lat, origin_lon):
     xs = [xy[0] for xy in station_xy.values()]
     ys = [xy[1] for xy in station_xy.values()]
 
     all_x = xs + [source_xy[0]]
     all_y = ys + [source_xy[1]]
 
-    margin = max( max(all_x) - min(all_x), max(all_y) - min(all_y),) * 2 + 50.0
+    margin = max(max(all_x) - min(all_x), max(all_y) - min(all_y)) * 2 + 50.0
 
     xmin, xmax = min(all_x) - margin, max(all_x) + margin
     ymin, ymax = min(all_y) - margin, max(all_y) + margin
 
     resolution = 1
 
-    X, Y = np.meshgrid(np.arange(xmin, xmax, resolution),np.arange(ymin, ymax, resolution))
+    X, Y = np.meshgrid(np.arange(xmin, xmax, resolution), np.arange(ymin, ymax, resolution))
 
-    # Convert the UTM grid from kilometres to geographic coordinates.
     ox, oy = transformer_to_utm.transform(origin_lon, origin_lat)
+    grid_lon, grid_lat = transformer_to_wgs.transform(ox + X * 1000.0, oy + Y * 1000.0)
 
-    grid_lon, grid_lat = transformer_to_wgs.transform(ox + X * 1000.0,oy + Y * 1000.0,)
-
-    # Calculate geodesic distances from every grid point to each station.
     D = {}
-
     for name, (s_lat, s_lon) in station_latlon.items():
         _, _, dist_m = geod.inv(
             grid_lon,
@@ -123,7 +118,6 @@ def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_l
             np.full_like(grid_lon, s_lon),
             np.full_like(grid_lat, s_lat),
         )
-
         D[name] = dist_m / 1000.0
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -133,32 +127,18 @@ def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_l
 
     for i, (pair, dist_diff) in enumerate(delta.items()):
         station_a, station_b = pair.split("-")
-
         H = D[station_b] - D[station_a] - dist_diff
-
         ax.contour(X, Y, H, levels=[0], colors=colors[i], linewidths=2.5)
-
-        legend_lines.append(Line2D([0], [0], color=colors[i % len(colors)], linewidth=2.5, label=f"{station_a}–{station_b} hyperbola", ))
+        legend_lines.append(Line2D([0], [0], color=colors[i % len(colors)], linewidth=2.5, label=f"{station_a}–{station_b} hyperbola"))
 
     for name, (sx, sy) in station_xy.items():
         ax.scatter(sx, sy, marker=".", s=160, zorder=5)
         ax.text(sx + 5, sy + 5, name, fontsize=12, fontweight="bold")
 
-    legend_lines.append(Line2D([0], [0], marker=".", color="black", linestyle="None",markersize=10, label="Station"))
+    legend_lines.append(Line2D([0], [0], marker=".", color="black", linestyle="None", markersize=10, label="Station"))
 
     ax.scatter(source_xy[0], source_xy[1], marker="*", s=300, zorder=10)
-
-    legend_lines.append(
-        Line2D(
-            [0],
-            [0],
-            marker="*",
-            color="black",
-            linestyle="None",
-            markersize=15,
-            label="Estimated source",
-        )
-    )
+    legend_lines.append(Line2D([0], [0], marker="*", color="black", linestyle="None", markersize=15, label="Estimated source"))
 
     ax.legend(handles=legend_lines, loc="best")
     ax.set_xlabel("East-West distance from origin station (km)")
@@ -169,7 +149,6 @@ def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_l
     fig.tight_layout()
 
     return image_to_base64(fig)
-
 
 
 def create_velocity_plot(inv):
@@ -267,7 +246,6 @@ def invert_location_velocity_geod(
     grid_step_deg=0.015,
     margin_deg=2.5,
 ):
-    """Grid search over geographic (lat, lon, v) using true geodetic distances followed by least-squares refinement."""
     lats = [coord[0] for coord in station_latlon.values()]
     lons = [coord[1] for coord in station_latlon.values()]
     
@@ -368,24 +346,20 @@ def run_triangulation(
     spectrogram_plot = create_spectrogram_plot(traces, fmin=fmin, fmax=fmax)
 
     print("Calculating spectral features")
-
     spectral_features = analyze_spectral_features(
         traces,
         window_seconds=10.0,
         step_seconds=5.0,
-        fmin= fmin,
-        fmax= fmax,
+        fmin = fmin,
+        fmax = fmax,
     )
 
     spectral_plot = None
-
     if spectral_features:
         print("Creating spectral feature plot")
         spectral_plot = create_spectral_feature_plot(spectral_features)
     else:
         print("No usable spectral features were calculated.")
-
-    print(f"Calculated {len(spectral_features)} spectral feature windows.")
 
     print("Calculating Hilbert envelopes")
     envelopes = {name: get_hilbert_envelope(tr, smooth_cutoff) for name, tr in traces.items()}
@@ -400,12 +374,6 @@ def run_triangulation(
     lag_bc = calculate_envelope_lag(envelopes[station_b], envelopes[station_c], fs, max_shift_seconds)
 
     closure_error = lag_ac["lag"] - (lag_ab["lag"] + lag_bc["lag"])
-
-    print(f"\nHilbert Envelope TDOA results:")
-    print(f"{station_a} - {station_b}: lag = {lag_ab['lag']:+.3f} s, CC = {lag_ab['cc_max']:.3f}")
-    print(f"{station_a} - {station_c}: lag = {lag_ac['lag']:+.3f} s, CC = {lag_ac['cc_max']:.3f}")
-    print(f"{station_b} - {station_c}: lag = {lag_bc['lag']:+.3f} s, CC = {lag_bc['cc_max']:.3f}")
-    print(f"\nTDOA closure error: {closure_error:+.3f} s")
 
     origin_lat = stations[0]["lat"]
     origin_lon = stations[0]["lon"]
@@ -442,19 +410,13 @@ def run_triangulation(
         for s in stations
     }
 
-    print(f"Latitude  : {source_lat:.6f}")
-    print(f"Longitude : {source_lon:.6f}")
-    print(f"Velocity  : {velocity:.3f} km/s")
-    print(f"Residual  : {residual_norm:.4f} s")
-
     delta = {
         f"{station_a}-{station_b}": -velocity * lag_ab["lag"],
         f"{station_a}-{station_c}": -velocity * lag_ac["lag"],
         f"{station_b}-{station_c}": -velocity * lag_bc["lag"],
     }
 
-    print("Creating hyperbola and velocity plots")
-    plot_png = create_hyperbola_plot(station_xy, station_latlon, delta, (x_src, y_src), origin_lat, origin_lon,)
+    plot_png = create_hyperbola_plot(station_xy, station_latlon, delta, (x_src, y_src), origin_lat, origin_lon)
     velocity_plot = create_velocity_plot(inv)
 
     pairs = [
@@ -505,7 +467,6 @@ def run_triangulation(
             "v_max": float(v_max),
             "v_step": float(v_step),
         },
-
     }
 
 def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
@@ -544,5 +505,147 @@ def create_aligned_envelope_plot(envelopes, lags, sampling_rate):
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
     fig.tight_layout()
+    return image_to_base64(fig)
+
+
+def image_to_base64(fig):
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def extract_spectral_features(data, fs, fmin, fmax):
+    data = np.asarray(data, dtype=float)
+    data = data - np.mean(data)
+
+    frequencies, power = welch(data, fs=fs, nperseg=min(256, len(data)),)
+
+    mask = ((frequencies >= fmin) & (frequencies <= fmax))
+
+    frequencies = frequencies[mask]
+    power = power[mask]
+    total_power = np.sum(power)
+
+    if frequencies.size == 0 or total_power <= 0:
+        raise ValueError("No usable spectral power.")
+
+    dominant_frequency = frequencies[np.argmax(power)]
+    centroid = np.sum(frequencies * power) / total_power
+
+
+    return {
+        "dominant_frequency_hz": float(dominant_frequency),
+        "spectral_centroid_hz": float(centroid),
+    
+    }
+
+
+def analyze_spectral_features(traces, fmin, fmax, window_seconds=10.0, step_seconds=5.0,):
+    if window_seconds <= 0 or step_seconds <= 0:
+        raise ValueError("Window and step durations must be positive.")
+
+    results = []
+
+    for name, trace in traces.items():
+        sampling_rate = trace.stats.sampling_rate
+
+        samples_per_window = int(round(window_seconds * sampling_rate))
+        step_samples = int(round(step_seconds * sampling_rate))
+
+        if samples_per_window < 16 or step_samples < 1:
+            raise ValueError("Invalid window or step size.")
+
+        if trace.stats.npts < samples_per_window:
+            print(f"Skipping {name}: trace is shorter than one window.")
+            continue
+
+        for first_sample in range(
+            0,
+            trace.stats.npts - samples_per_window + 1,
+            step_samples,
+        ):
+            last_sample = first_sample + samples_per_window
+            data = trace.data[first_sample:last_sample]
+
+            try:
+                features = extract_spectral_features(
+                    data,
+                    sampling_rate,
+                    fmin=fmin,
+                    fmax=fmax,
+                )
+            except ValueError as error:
+                print(f"Skipping {name} window: {error}")
+                continue
+
+            center_seconds = (
+                first_sample + (samples_per_window - 1) / 2
+            ) / sampling_rate
+
+            results.append({
+                "station": name,
+                "time_seconds": float(center_seconds),
+                **features,
+            })
+
+    return results
+
+
+def create_spectral_feature_plot(results):
+    if not results:
+        raise ValueError("No spectral features available to plot.")
+
+    feature_names = [
+        ("dominant_frequency_hz", "Dominant Frequency (Hz)"),
+        ("spectral_centroid_hz", "Spectral Centroid (Hz)"),
+    ]
+
+    stations = list(dict.fromkeys(
+        row["station"] for row in results
+    ))
+
+    fig, axes = plt.subplots(
+        len(feature_names),
+        1,
+        figsize=(12, 11),
+        sharex=True,
+    )
+
+    for ax, (feature, ylabel) in zip(axes, feature_names):
+        for station in stations:
+            station_rows = [
+                row for row in results
+                if row["station"] == station
+            ]
+
+            times = [
+                row["time_seconds"] for row in station_rows
+            ]
+
+            values = [
+                row[feature]
+                if row[feature] is not None
+                else np.nan
+                for row in station_rows
+            ]
+
+            ax.plot(
+                times,
+                values,
+                marker=".",
+                markersize=3,
+                linewidth=1,
+                label=station,
+            )
+
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    axes[-1].set_xlabel("Time from Common Window Start (seconds)")
+    fig.suptitle("Spectral Features Across Seismic Stations")
+    fig.tight_layout()
+
     return image_to_base64(fig)
 

@@ -300,6 +300,8 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
     <div class="plot-section"><h2>Hyperbola intersection</h2><img id="hyp_t" class="plot" alt="TDOA hyperbolas"></div>
     <div class="plot-section"><h2>Misfit vs. velocity</h2><img id="vel_t" class="plot" alt="Velocity misfit"></div>
     <div class="plot-section"><h2>Aligned Hilbert envelopes</h2><img id="aligned_t" class="plot" alt="Aligned Envelopes"></div>
+    <div class="plot-section"><h2>Spectral features by station and time window</h2><img id="spectral_t" class="plot" alt="Spectral feature analysis"></div>
+
   </div>
   <div class="panel result" id="ccs_t">
     <h2>Envelope cross-correlation</h2>
@@ -551,7 +553,15 @@ function showTdoa(d){
   document.getElementById('hyp_t').src = 'data:image/png;base64,' + d.plot_png;
   document.getElementById('vel_t').src = 'data:image/png;base64,' + d.velocity_plot;
   document.getElementById('aligned_t').src = 'data:image/png;base64,' + d.aligned_plot;
-  
+  const spectralImage = document.getElementById('spectral_t');
+
+  if (d.spectral_plot) {
+    spectralImage.src = 'data:image/png;base64,' + d.spectral_plot;
+    spectralImage.style.display = 'block';
+  } else {
+    spectralImage.removeAttribute('src');
+    spectralImage.style.display = 'none';
+  }
   const box = document.getElementById('ccplots_t'); box.innerHTML = '';
   d.pairs.forEach((p,i) => {
     const div = document.createElement('div'); div.className = 'cc'; box.appendChild(div);
