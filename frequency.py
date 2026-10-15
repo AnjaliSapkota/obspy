@@ -1,170 +1,167 @@
-
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows, welch
-from scipy.optimize import least_squares
 import base64
 import io
 
-def image_to_base64(fig):
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
-    plt.close(fig)
-    return base64.b64encode(buffer.getvalue()).decode()
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+from obspy import UTCDateTime
+from scipy.signal import butter, sosfiltfilt, hilbert, welch
+from triangulate import fetch_waveform, trim_to_common_window
+
+client = "https://seiscomp.alertnepal.online"
+
+stations = [
+    {"sta": "EQM10", "net": "NP", "loc": "*", "cha": "EHZ", "lat": 28.299517, "lon": 83.960148},
+    {"sta": "KKN", "net": "NK", "loc": "*", "cha": "BHZ", "lat": 27.8, "lon": 85.279},
+    {"sta": "EQM13", "net": "NP", "loc": "*", "cha": "EHZ", "lat": 28.256323, "lon": 85.367569},
+]
+
+start = UTCDateTime("2026-10-10T22:37:00")
+end   = UTCDateTime("2026-10-10T22:40:00")
 
 
-def extract_spectral_features(data, fs, fmin, fmax):
+def estimate_dominant_frequency_band(data, fs, fmin, fmax, power_fraction=0.90, nperseg=None,):
     data = np.asarray(data, dtype=float)
+
+    # Remove the DC component.
     data = data - np.mean(data)
 
-    frequencies, power = welch(data, fs=fs, nperseg=min(256, len(data)),)
+    frequencies, psd = welch(data, fs=fs, window="hann", nperseg= min(4096,len(data)), detrend="constant", scaling="density",)
 
-    mask = ((frequencies >= fmin) & (frequencies <= fmax))
+    mask = (frequencies >= fmin) & (frequencies <= fmax)
+    band_frequencies = frequencies[mask]
+    band_psd = psd[mask]
 
-    frequencies = frequencies[mask]
-    power = power[mask]
-    total_power = np.sum(power)
+    df = frequencies[1] - frequencies[0]
+    bin_power = band_psd * df
+    total_power = float(np.sum(bin_power))
 
-    if frequencies.size == 0 or total_power <= 0:
-        raise ValueError("No usable spectral power.")
+    peak_index = int(np.argmax(band_psd))
+    dominant_frequency = float(band_frequencies[peak_index])
 
-    dominant_frequency = frequencies[np.argmax(power)]
-    centroid = np.sum(frequencies * power) / total_power
-    bandwidth = np.sqrt(np.sum((frequencies - centroid) ** 2 * power) / total_power)
+    left = peak_index
+    right = peak_index
 
-    low_band = (frequencies >= 1.0) & (frequencies < 3.0)
-    high_band = (frequencies >= 3.0) & (frequencies <= 6.0)
+    captured_power = float(bin_power[peak_index])
+    target_power = power_fraction * total_power
 
-    low_energy = np.sum(power[low_band])
-    high_energy = np.sum(power[high_band])
+    while captured_power < target_power:
+        left_power = bin_power[left - 1] if left > 0 else -np.inf
+        right_power = bin_power[right + 1] if right < len(bin_power) - 1 else -np.inf
 
-        
-    if (
-        low_energy > 0
-        and np.isfinite(low_energy)
-        and np.isfinite(high_energy)
-        and np.any(high_band)
-    ):
-        band_ratio = float(high_energy / low_energy)
-    else:
-        band_ratio = None
+        if left_power == -np.inf and right_power == -np.inf:
+            break
 
+        if left_power >= right_power:
+            left -= 1
+            captured_power += float(bin_power[left])
+        else:
+            right += 1
+            captured_power += float(bin_power[right])
+
+    low_frequency = float(band_frequencies[left])
+    high_frequency = float(band_frequencies[right])
 
     return {
-        "dominant_frequency_hz": float(dominant_frequency),
-        "spectral_centroid_hz": float(centroid),
-        "spectral_bandwidth_hz": float(bandwidth),
-        "high_low_band_ratio": band_ratio,
+        "dominant_frequency_hz": dominant_frequency,
+        "band_low_hz": low_frequency,   
+        "band_high_hz": high_frequency,
+        "band_power_fraction": float(captured_power / total_power),
+        "frequencies_hz": frequencies,
+        "psd": psd,
     }
 
 
-def analyze_spectral_features(traces, fmin, fmax, window_seconds=10.0, step_seconds=5.0,):
-    if window_seconds <= 0 or step_seconds <= 0:
-        raise ValueError("Window and step durations must be positive.")
+def calculate_band_envelope( data, fs, low_frequency, high_frequency, filter_order=4,):
+    data = np.asarray(data, dtype=float)
+  
+    sos = butter(filter_order, [low_frequency, high_frequency], btype="bandpass", fs=fs, output="sos",)
 
+    filtered = sosfiltfilt(sos, data)
+
+    analytic_signal = hilbert(filtered)
+    envelope = np.abs(analytic_signal)
+    envelope_power = envelope ** 2
+
+    peak_index = int(np.argmax(envelope_power))
+    peak_time_seconds = peak_index / fs
+
+    return {
+        "filtered_waveform": filtered,
+        "envelope": envelope,
+        "envelope_power": envelope_power,
+        "peak_index": peak_index,
+        "peak_time_seconds": float(peak_time_seconds),
+        "peak_envelope_amplitude": float(envelope[peak_index]),
+        "peak_envelope_power": float(envelope_power[peak_index]),
+    }
+
+
+def analyze_trace(trace, fmin, fmax, power_fraction=0.90, nperseg=None,):
+    data = np.asarray(trace.data, dtype=float)
+    fs = float(trace.stats.sampling_rate)
+
+    band = estimate_dominant_frequency_band(data=data, fs=fs, fmin=fmin, fmax=fmax, power_fraction=power_fraction, nperseg=nperseg,)
+
+    envelope_result = calculate_band_envelope(
+        data=data,
+        fs=fs,
+        low_frequency=band["band_low_hz"],
+        high_frequency=band["band_high_hz"],
+    )
+
+    peak_time_utc = trace.stats.starttime + envelope_result["peak_time_seconds"]
+
+    result = dict(band)
+    result.update(envelope_result)
+
+    result["peak_time_utc"] = str(peak_time_utc)
+    result["trace_start_utc"] = str(trace.stats.starttime)
+    result["station_id"] = trace.id
+    result["sampling_rate_hz"] = fs
+
+    return result
+
+
+def analyze_traces( traces, fmin, fmax, power_fraction=0.90, nperseg=None,):
     results = []
 
     for name, trace in traces.items():
-        sampling_rate = trace.stats.sampling_rate
+        try:
+            result = analyze_trace(
+                trace=trace,
+                fmin=fmin,
+                fmax=fmax,
+                power_fraction=power_fraction,
+                nperseg=nperseg,
+            )
 
-        samples_per_window = int(round(window_seconds * sampling_rate))
-        step_samples = int(round(step_seconds * sampling_rate))
+            result["station"] = name
+            results.append(result)
 
-        if samples_per_window < 16 or step_samples < 1:
-            raise ValueError("Invalid window or step size.")
+            print(f"\nStation: {name}")
+            print("Dominant frequency:", f'{result["dominant_frequency_hz"]:.3f} Hz')
+            print("Selected band:", f'{result["band_low_hz"]:.3f}–{result["band_high_hz"]:.3f} Hz')
+            print("Peak time from trace start:", f'{result["peak_time_seconds"]:.3f} seconds')
+            print("Peak UTC:", result["peak_time_utc"])
 
-        if trace.stats.npts < samples_per_window:
-            print(f"Skipping {name}: trace is shorter than one window.")
-            continue
-
-        for first_sample in range(
-            0,
-            trace.stats.npts - samples_per_window + 1,
-            step_samples,
-        ):
-            last_sample = first_sample + samples_per_window
-            data = trace.data[first_sample:last_sample]
-
-            try:
-                features = extract_spectral_features(
-                    data,
-                    sampling_rate,
-                    fmin=fmin,
-                    fmax=fmax,
-                )
-            except ValueError as error:
-                print(f"Skipping {name} window: {error}")
-                continue
-
-            center_seconds = (
-                first_sample + (samples_per_window - 1) / 2
-            ) / sampling_rate
-
-            results.append({
-                "station": name,
-                "time_seconds": float(center_seconds),
-                **features,
-            })
+        except ValueError as error:
+            print(f"Skipping {name}: {error}")
 
     return results
 
 
-def create_spectral_feature_plot(results):
-    if not results:
-        raise ValueError("No spectral features available to plot.")
+if __name__ == "__main__":
+    traces = {}
 
-    feature_names = [
-        ("dominant_frequency_hz", "Dominant Frequency (Hz)"),
-        ("spectral_centroid_hz", "Spectral Centroid (Hz)"),
-        ("spectral_bandwidth_hz", "Spectral Bandwidth (Hz)"),
-        ("high_low_band_ratio", "High/Low Frequency Power Ratio"),
-    ]
+    for s in stations:
+        try:
+            trace = fetch_waveform(station=s, start=start, end=end, target_fs=100.0, freqmin=1.0, freqmax=20.0,)
+            traces[s["sta"]] = trace
+        except Exception as e:
+            print(f"Error fetching waveform for {s['sta']}: {e}")
 
-    stations = list(dict.fromkeys(
-        row["station"] for row in results
-    ))
+    trim_to_common_window(traces)
 
-    fig, axes = plt.subplots(
-        len(feature_names),
-        1,
-        figsize=(12, 11),
-        sharex=True,
-    )
-
-    for ax, (feature, ylabel) in zip(axes, feature_names):
-        for station in stations:
-            station_rows = [
-                row for row in results
-                if row["station"] == station
-            ]
-
-            times = [
-                row["time_seconds"] for row in station_rows
-            ]
-
-            values = [
-                row[feature]
-                if row[feature] is not None
-                else np.nan
-                for row in station_rows
-            ]
-
-            ax.plot(
-                times,
-                values,
-                marker=".",
-                markersize=3,
-                linewidth=1,
-                label=station,
-            )
-
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-
-    axes[-1].set_xlabel("Time from Common Window Start (seconds)")
-    fig.suptitle("Spectral Features Across Seismic Stations")
-    fig.tight_layout()
-
-    return image_to_base64(fig)
-
+    results = analyze_traces(traces, fmin=2.0, fmax=8.0)
