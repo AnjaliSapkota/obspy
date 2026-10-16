@@ -16,9 +16,9 @@ STA_STATIONS = [
 
 
 TDOA_STATIONS = [
-    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
-    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
-    {"sta": "", "net": "", "loc": "*", "cha": "", "lat": None, "lon": None},
+    {"sta": "EQM10", "lat": 28.299517, "lon": 83.960148, "net": "NP", "cha": "EHZ", "loc": "*"},
+    {"sta": "KKN", "lat": 27.8, "lon": 85.279, "net": "NK", "cha": "BHZ", "loc": "*"},
+    {"sta": "EQM13", "lat": 28.256323, "lon": 85.367569, "net": "NP", "cha": "EHZ", "loc": "*"},
 ]
 
 
