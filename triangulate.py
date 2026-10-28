@@ -1,3 +1,4 @@
+from itertools import combinations
 import base64
 import io
 import itertools
@@ -9,6 +10,8 @@ from obspy.clients.fdsn import Client
 from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows, welch
 from scipy.optimize import least_squares
 from pyproj import Transformer, Geod
+from pathlib import Path
+from scipy.signal import butter, coherence, correlate, correlation_lags, filtfilt, hilbert, windows, welch
 
 client = Client("https://seiscomp.alertnepal.online")
 
@@ -81,6 +84,119 @@ def create_spectrogram_plot(traces, fmin, fmax):
     fig.tight_layout()
     return image_to_base64(fig)
 
+
+def calculate_cross_coherence(traces, fs, fmin, fmax, window_seconds=10.0):
+    pair_results = {}
+
+    nperseg = min(int(window_seconds * fs), min(len(tr.data) for tr in traces.values()))
+
+    if nperseg < 16:
+        raise RuntimeError("Not enough samples for cross-coherence.")
+
+    for a, b in combinations(traces.keys(), 2):
+        data_a = traces[a].data.astype(float)
+        data_b = traces[b].data.astype(float)
+
+        frequencies, values = coherence(
+            data_a,
+            data_b,
+            fs=fs,
+            window="hann",
+            nperseg=nperseg,
+            noverlap=nperseg // 2,
+        )
+
+        mask = (frequencies >= fmin) & (frequencies <= fmax)
+
+        pair_results[f"{a}-{b}"] = {
+            "frequencies": frequencies[mask],
+            "coherence": values[mask],
+        }
+
+    return pair_results
+
+
+def select_coherent_band(pair_results, fmin, fmax, threshold=0.5, min_bandwidth=0.5):
+    frequencies = next(iter(pair_results.values()))["frequencies"]
+
+    if len(frequencies) < 2:
+        return fmin, fmax
+
+    coherence_values = np.array([
+        result["coherence"]
+        for result in pair_results.values()
+    ])
+
+    mean_coherence = np.mean(coherence_values, axis=0)
+
+    # Select frequencies with sufficient average coherence.
+    valid = mean_coherence >= threshold
+
+    # Find continuous frequency bands.
+    indices = np.where(valid)[0]
+
+    if len(indices) == 0:
+        print("No coherent band found. Keeping the original frequency band.")
+        return fmin, fmax
+
+    groups = np.split(indices, np.where(np.diff(indices) > 1)[0] + 1)
+
+    bands = []
+
+    for group in groups:
+        if len(group) < 2:
+            continue
+
+        low = frequencies[group[0]]
+        high = frequencies[group[-1]]
+
+        if high - low >= min_bandwidth:
+            bands.append((low, high))
+
+    if not bands:
+        print("No sufficiently wide coherent band found. Keeping the original band.")
+        return fmin, fmax
+
+    # Choose the widest continuous coherent band.
+    selected_low, selected_high = max(
+        bands,
+        key=lambda band: band[1] - band[0],
+    )
+
+    print(f"Selected coherent band: {selected_low:.2f}–{selected_high:.2f} Hz")
+    print(f"Mean coherence threshold: {threshold:.2f}")
+
+    return float(selected_low), float(selected_high)
+
+
+def create_cross_coherence_plot(pair_results, threshold=0.5):
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for pair, result in pair_results.items():
+        ax.plot(
+            result["frequencies"],
+            result["coherence"],
+            linewidth=1.2,
+            label=pair,
+        )
+
+    ax.axhline(
+        threshold,
+        color="black",
+        linestyle="--",
+        label=f"Coherence threshold ({threshold:.2f})",
+    )
+
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Magnitude-squared coherence")
+    ax.set_title("Cross-Coherence Between Station Pairs")
+    ax.set_ylim(0, 1.05)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    fig.tight_layout()
+
+    return image_to_base64(fig)
 
 def create_hyperbola_plot(station_xy, station_latlon, delta, source_xy, origin_lat, origin_lon):
     xs = [xy[0] for xy in station_xy.values()]
@@ -332,6 +448,44 @@ def run_triangulation(
     print("Trimming to common window")
     trim_to_common_window(traces)
 
+    print("Calculating cross-coherence")
+
+    coherence_threshold = 0.5
+
+    coherence_results = calculate_cross_coherence(
+        traces,
+        fs=fs,
+        fmin=fmin,
+        fmax=fmax,
+        window_seconds=10.0,
+    )
+
+    coherence_plot = create_cross_coherence_plot(
+        coherence_results,
+        threshold=coherence_threshold,
+    )
+
+    selected_fmin, selected_fmax = select_coherent_band(
+        coherence_results,
+        fmin=fmin,
+        fmax=fmax,
+        threshold=coherence_threshold,
+        min_bandwidth=0.5,
+    )
+
+    if selected_fmax > selected_fmin:
+        for trace in traces.values():
+            trace.filter(
+                "bandpass",
+                freqmin=selected_fmin,
+                freqmax=selected_fmax,
+                corners=4,
+                zerophase=True,
+            )
+
+    fmin = selected_fmin
+    fmax = selected_fmax
+
     print("Creating waveform plots")
     waveform_plot = create_waveform_plot(traces)
     spectrogram_plot = create_spectrogram_plot(traces, fmin=fmin, fmax=fmax)
@@ -446,6 +600,14 @@ def run_triangulation(
         "stations": station_coordinates,
         "waveform_plot": waveform_plot,
         "spectrogram_plot": spectrogram_plot,
+        "coherence_plot": coherence_plot,
+        "coherence_results": {
+            pair: {
+                "frequencies": values["frequencies"].tolist(),
+                "coherence": values["coherence"].tolist(),
+            }
+            for pair, values in coherence_results.items()
+        },
         "spectral_features": spectral_features,
         "spectral_plot": spectral_plot,
         "plot_png": plot_png,
@@ -644,4 +806,3 @@ def create_spectral_feature_plot(results):
     fig.tight_layout()
 
     return image_to_base64(fig)
-

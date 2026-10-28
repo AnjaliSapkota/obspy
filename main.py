@@ -370,7 +370,7 @@ async function lookup(k,i){
 }
 
 function addStation(k='a'){
-  S[k].push({sta:"", net:"", loc:"*", cha:"EHZ", lat:null, lon:null});
+  S[k].push({sta:"", net:"", loc:"*", cha:"", lat:null, lon:null});
   drawStations(k);
 }
 function removeStation(i,k='a'){
