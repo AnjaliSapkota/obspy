@@ -272,8 +272,9 @@ img.plot{max-width:100%;border-radius:6px;border:1px solid var(--line);display:b
 <div class="panel">
   <h2>Data source</h2>
   <label>FDSN base URL (for coordinate lookup)</label><input type="text" id="t_base_url" value="{{ base_url }}">
-  <h2 style="margin-top:14px">Stations (exactly 3)</h2>
+  <h2 style="margin-top:14px">Stations (min 3)</h2>
   <div id="stations_t"></div>
+  <button class="add" onclick="addStation('t')">+ Add station</button>
 
   <label>Start (UTC)</label><input type="text" id="t_start" placeholder="YYYY-MM-DDTHH:MM:SS">
   <label>End (UTC)</label><input type="text" id="t_end" placeholder="YYYY-MM-DDTHH:MM:SS">
@@ -331,10 +332,10 @@ function setF(k,i,f,val){ S[k][i][f] = val; }
 function setNum(k,i,f,val){ const n = parseFloat(val); S[k][i][f] = Number.isFinite(n) ? n : null; }
 
 function drawStations(k){
-  const removable = k === 'a';
+  const removable = k === 'a' || k === 't';
   document.getElementById('stations_'+k).innerHTML = S[k].map((s,i) => `
     <div class="sta">
-      ${removable ? `<button class="rm" onclick="removeStation(${i})" title="Remove">\u00d7</button>` : ''}
+      ${removable ? `<button class="rm" onclick="removeStation(${i},'${k}')" title="Remove">\u00d7</button>` : ''}
       <div class="name">Station ${i+1}${k==='t' && i===0 ? ' \u2014 origin' : ''}</div>
       <div class="row3">
         <input type="text" value="${s.sta}" onchange="setF('${k}',${i},'sta',this.value.trim().toUpperCase());lookup('${k}',${i})" placeholder="STA">
@@ -368,13 +369,13 @@ async function lookup(k,i){
   }
 }
 
-function addStation(){
-  S.a.push({sta:"", net:"", loc:"*", cha:"EHZ", lat:null, lon:null});
-  drawStations('a');
+function addStation(k='a'){
+  S[k].push({sta:"", net:"", loc:"*", cha:"EHZ", lat:null, lon:null});
+  drawStations(k);
 }
-function removeStation(i){
-  if(S.a.length<=3){ setStatus('a','At least 3 stations are needed.', true); return; }
-  S.a.splice(i,1); drawStations('a');
+function removeStation(i,k='a'){
+  if(S[k].length<=3){ setStatus(k,'At least 3 stations are needed.', true); return; }
+  S[k].splice(i,1); drawStations(k);
 }
 
 function getMap(k){
@@ -501,6 +502,7 @@ function showSta(d){
 /* TDOA */
 async function runTdoa(){
   const btn = document.getElementById('go_t'); btn.disabled = true;
+  if(S.t.length < 3){ setStatus('t','At least 3 stations are needed.', true); btn.disabled = false; return; }
   if(!checkCoords('t')){ btn.disabled = false; return; }
   setStatus('t','Downloading waveforms and processing. This can take a minute.');
   try{
