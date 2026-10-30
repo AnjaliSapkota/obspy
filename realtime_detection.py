@@ -26,9 +26,14 @@ FDSN_URL = "https://seiscomp.alertnepal.online"   # only used to look up missing
 # service at startup; if that fails they are simply left off the map.
 STATIONS = [
     {"net": "NP", "sta": "EQM10", "cha": "EHZ", "loc": "*", "lat": 28.299517, "lon": 83.960148},
-    {"net": "NP", "sta": "EQM13", "cha": "EHZ", "loc": "*", "lat": 28.256323, "lon": 85.367569},
+    {"net": "NP", "sta": "EQM26", "cha": "EHZ", "loc": "*", "lat": 27.3936969, "lon": 86.6791885},
     {"net": "NP", "sta": "EQM07", "cha": "EHZ", "loc": "*", "lat": 27.814941, "lon": 86.713401},
     {"net": "NP", "sta": "EQM08", "cha": "EHZ", "loc": "*", "lat": 27.831000, "lon": 86.65},
+    {"net": "NP", "sta": "EQM11", "cha": "EHZ", "loc": "*", "lat": 29.2859556, "lon": 81.2741972},
+    {"net": "NP", "sta": "EQM22", "cha": "EHZ", "loc": "*", "lat": 28.895805, "lon": 80.227341},
+    {"net": "AM", "sta": "R0F23", "cha": "EHZ", "loc": "*", "lat": 28.045045, "lon": 84.072371},
+
+
 ]
 
 WINDOW_SECONDS = 300      # data shown / analysed each cycle
@@ -117,7 +122,7 @@ def fetch_waveform(station, start, end):
     stream.merge(method=1, fill_value=0)
     stream.detrend("linear")
     stream.detrend("demean")
-    stream.taper(max_percentage=0.05, type="hann")
+    stream.taper(max_percentage=0.05, type="hann", side = "left")
     stream.resample(sampling_rate=FS)
     stream.filter("bandpass", freqmin=FMIN, freqmax=FMAX, corners=4, zerophase=False)
     return stream[0]
@@ -1178,7 +1183,7 @@ function tick() {
 }
 
 function render(d) {
-  data = d;S
+  data = d;
   $("server").textContent = "SeedLink " + d.settings.server;
   const err = $("error");
   err.style.display = d.error ? "block" : "none";
