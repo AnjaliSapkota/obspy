@@ -32,7 +32,7 @@ STATIONS = [
     {"net": "NP", "sta": "EQM11", "cha": "EHZ", "loc": "*", "lat": 29.2859556, "lon": 81.2741972},
     {"net": "NP", "sta": "EQM22", "cha": "EHZ", "loc": "*", "lat": 28.895805, "lon": 80.227341},
     {"net": "AM", "sta": "R0F23", "cha": "EHZ", "loc": "*", "lat": 28.045045, "lon": 84.072371},
-
+    {"net": "AM", "sta": "R02C2", "cha": "EHZ", "loc": "*", "lat": 27.621622, "lon": 85.320148},
 
 ]
 
@@ -45,8 +45,8 @@ FS = 50.0                 # common sampling rate (Hz)
 FMIN, FMAX = 1.0, 8.0     # bandpass (Hz), FMAX must be < FS/2
 ENVELOPE_CUTOFF = 0.5     # envelope smoothing (Hz)
 
-THRESHOLD_RATIO = 8.0     # trigger when energy > THRESHOLD_RATIO x median energy of the window
-MIN_DURATION = 3.0        # s, ignore shorter triggers
+THRESHOLD_RATIO = 8.0     # trigger when energy > THRESHOLD_RATIO x baseline energy
+MIN_DURATION = 20.0        # s, ignore shorter triggers
 MERGE_GAP = 5.0           # s, merge triggers closer than this
 EDGE_SECONDS = 5.0        # s, ignore window edges (filter transients)
 DEDUP_SECONDS = 20.0      # same station + onset within this = same event
@@ -129,7 +129,6 @@ def fetch_waveform(station, start, end):
 
 
 def fetch_all(stations, start, end):
-    """Fetch all stations in parallel. Returns (traces, errors)."""
     def one(station):
         try:
             return station["sta"], fetch_waveform(station, start, end), None
@@ -205,7 +204,6 @@ def detect_events(name, trace, envelope):
 
 
 def update_detection_log(log, detections):
-    """Add detections not already logged; print + return the new ones."""
     new_entries = []
     for d in detections:
         t = d["onset"].timestamp
@@ -229,7 +227,6 @@ def update_detection_log(log, detections):
 
 
 def find_coincident_groups(detections, min_stations):
-    """Group detections whose onsets fall within COINCIDENCE_SECONDS; keep groups with enough stations."""
     dets = sorted(detections, key=lambda d: d["onset"])
     groups = []
     i = 0
@@ -270,7 +267,6 @@ def calculate_envelope_lag(env_a, env_b, fs, max_shift_seconds):
 
 
 def lag_closure_error(names, pairs):
-    """Worst triangle inconsistency: lag(a,c) - lag(a,b) - lag(b,c). None with fewer than 3 stations."""
     lag = {(p["a"], p["b"]): p["lag"] for p in pairs}
     worst = None
     for x, y, z in combinations(names, 3):
@@ -281,7 +277,6 @@ def lag_closure_error(names, pairs):
 
 
 def evaluate_candidate(candidate):
-    """Decide whether a candidate is confirmed yet. Returns (status, reason)."""
     n = len(candidate["stations"])
     if n < MIN_STATIONS:
         return "investigating", f"{n} of {MIN_STATIONS} stations so far, waiting for more"
@@ -303,7 +298,6 @@ def evaluate_candidate(candidate):
 
 
 def analyze_candidate(group, traces, envelopes, end):
-    """Envelope cross-correlation between the stations of one group."""
     first = {}
     for d in group:                      # group is sorted by onset
         first.setdefault(d["station"], d)
@@ -355,10 +349,6 @@ def analyze_candidate(group, traces, envelopes, end):
 
 
 def apply_candidates(candidates, found, now):
-    """
-    Merge this cycle's candidates into the history. Returns [(candidate, plot)] that changed.
-    A confirmed candidate is never downgraded; it is only replaced by a confirmed one with more stations.
-    """
     changed = []
     for new, plot in found:
         match = next((i for i, c in enumerate(candidates)
@@ -556,7 +546,6 @@ def create_ratio_plot(traces, ratios, detections, end):
 
 
 def create_aligned_envelope_plot(names, segments, traces, pairs, end):
-    """Event envelopes as recorded (top) and shifted by the measured lags (bottom)."""
     n = len(names)
     ref = names[0]
     shifts = {ref: 0.0}
@@ -734,7 +723,6 @@ def processing_loop():
 
 
 def build_payload():
-    """Snapshot of STATE plus the dashboard counters. Call with STATE_LOCK held."""
     now = time.time()
     candidates = [dict(c, has_plot=f"event-{c['id']}" in PLOTS) for c in STATE["candidates"]]
     stations = STATE["stations"]
