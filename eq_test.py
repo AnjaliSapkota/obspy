@@ -1,6 +1,4 @@
-
 import threading
-from fractions import Fraction
 
 import numpy as np
 
@@ -14,13 +12,11 @@ from scipy.signal import (
 )
 
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
-from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 
 from flask import Flask, jsonify, render_template_string
 
 
 app = Flask(__name__)
-
 
 
 SERVER_URL = "ring.wscada.net:18000"
@@ -118,7 +114,6 @@ STATIONS = [
 ]
 
 
-
 data_lock = threading.Lock()
 
 station_data = {}
@@ -129,6 +124,34 @@ connection_status = {
     "status": "disconnected",
     "message": "Waiting for SeedLink connection"
 }
+
+
+def reset_detector_state(current_data):
+    """Reset the recursive detector when its input configuration changes."""
+
+    current_data["detector_timestamps"] = np.array([], dtype=float)
+    current_data["detector_waveform"] = np.array([], dtype=float)
+    current_data["last_detection_input_timestamp"] = None
+
+    current_data["sta_value"] = 0.0
+    current_data["lta_value"] = 1e-99
+    current_data["detector_samples_seen"] = 0
+
+    current_data["current_sta"] = 0.0
+    current_data["current_lta"] = 0.0
+    current_data["current_sta_lta"] = 0.0
+
+    current_data["lta_frozen"] = False
+    current_data["lta_status"] = "UPDATING"
+
+    current_data["trigger_active"] = False
+    current_data["trigger_start_timestamp"] = None
+    current_data["trigger_duration"] = 0.0
+    current_data["trigger_max_ratio"] = 0.0
+
+    current_data["active_event"] = None
+    current_data["last_detection"] = None
+    current_data["detection_status"] = "Normal"
 
 
 for station in STATIONS:
@@ -151,54 +174,34 @@ for station in STATIONS:
 
         "longitude": station["lon"],
 
-        # Sampling rates
         "raw_sampling_rate": 0,
 
         "processed_sampling_rate": 0,
 
-        # Raw buffers
         "raw_timestamps": np.array([], dtype=float),
 
         "raw_waveform": np.array([], dtype=float),
 
-        # Processed buffers
         "processed_timestamps": np.array([], dtype=float),
 
         "processed_waveform": np.array([], dtype=float),
 
-        # Filtered history
         "filtered_timestamps": np.array([], dtype=float),
 
         "filtered_waveform": np.array([], dtype=float),
 
-        # Butterworth filter state
         "filter_sos": None,
 
         "filter_zi": None,
 
         "filter_signature": None,
 
-        # STA/LTA input history
-        "detector_timestamps": np.array([], dtype=float),
-
-        "detector_waveform": np.array([], dtype=float),
-
-        "last_detection_input_timestamp": None,
-
-        # STA/LTA output
-        "current_sta_lta": 0.0,
-
-        "detection_status": "Normal",
-
-        "active_event": None,
-
-        "last_detection": None,
-
-        "ignore_until_below_off": False,
+        "latest_timestamp": None,
 
         "preprocessing_error": None
     }
 
+    reset_detector_state(station_data[station_id])
 
 
 def preprocess_data(station_id, waveform, timestamps, sampling_rate):
@@ -212,7 +215,6 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
     if len(waveform) == 0:
         return
 
-    # Reset filter state if the sampling rate or settings change
     filter_signature = (
         sampling_rate,
         FILTER_LOW,
@@ -224,64 +226,40 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
     if current_data["filter_signature"] != filter_signature:
 
         current_data["filter_sos"] = None
-
         current_data["filter_zi"] = None
-
         current_data["filter_signature"] = filter_signature
 
         current_data["filtered_timestamps"] = np.array([], dtype=float)
-
         current_data["filtered_waveform"] = np.array([], dtype=float)
 
-        current_data["last_detection_input_timestamp"] = None
+        current_data["processed_timestamps"] = np.array([], dtype=float)
+        current_data["processed_waveform"] = np.array([], dtype=float)
 
-        current_data["detector_timestamps"] = np.array([], dtype=float)
+        reset_detector_state(current_data)
 
-        current_data["detector_waveform"] = np.array([], dtype=float)
-
-        current_data["active_event"] = None
-
-        current_data["detection_status"] = "Normal"
-
-        current_data["ignore_until_below_off"] = False
-
-    # Use the updated raw buffer as detrending context
+    # Use the updated raw buffer as detrending context.
     context_waveform = current_data["raw_waveform"].copy()
 
-    # Demean
     if REMOVE_MEAN:
+        context_waveform = context_waveform - np.mean(context_waveform)
 
-        context_waveform = (
-            context_waveform - np.mean(context_waveform)
-        )
-
-    # Linear detrending
     if REMOVE_LINEAR_TREND and len(context_waveform) >= 2:
+        context_waveform = detrend(context_waveform, type="linear")
 
-        context_waveform = detrend(
-            context_waveform,
-            type="linear"
-        )
-
-    # Extract only the incoming samples
+    # Extract only the incoming samples.
     processed_chunk = context_waveform[-len(waveform):]
 
-    # Butterworth bandpass filtering
     if ENABLE_FILTER:
 
         nyquist_frequency = sampling_rate / 2.0
 
-        if not (
-            0 < FILTER_LOW < FILTER_HIGH < nyquist_frequency
-        ):
-
+        if not (0 < FILTER_LOW < FILTER_HIGH < nyquist_frequency):
             raise ValueError(
                 f"Invalid filter frequencies for {station_id}. "
                 f"Nyquist frequency is {nyquist_frequency} Hz."
             )
 
         if current_data["filter_sos"] is None:
-
             current_data["filter_sos"] = butter(
                 FILTER_ORDER,
                 [FILTER_LOW, FILTER_HIGH],
@@ -293,11 +271,8 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
         sos = current_data["filter_sos"]
 
         if current_data["filter_zi"] is None:
-
             zi = sosfilt_zi(sos) * processed_chunk[0]
-
         else:
-
             zi = current_data["filter_zi"]
 
         filtered_chunk, final_zi = sosfilt(
@@ -309,10 +284,8 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
         current_data["filter_zi"] = final_zi
 
     else:
-
         filtered_chunk = processed_chunk
 
-    # Append filtered samples
     current_data["filtered_timestamps"] = np.concatenate([
         current_data["filtered_timestamps"],
         timestamps
@@ -323,7 +296,6 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
         filtered_chunk
     ])
 
-    # Keep five minutes of filtered data
     cutoff_time = timestamps[-1] - BUFFER_SECONDS
 
     valid_indices = (
@@ -338,22 +310,18 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
         current_data["filtered_waveform"][valid_indices]
     )
 
-    # Optional resampling
     filtered_history = current_data["filtered_waveform"]
-
     filtered_times = current_data["filtered_timestamps"]
 
-    if ENABLE_RESAMPLING and not np.isclose(
-        sampling_rate,
-        TARGET_FS
-    ):
+    if ENABLE_RESAMPLING and not np.isclose(sampling_rate, TARGET_FS):
 
-        ratio = Fraction(
-            TARGET_FS / sampling_rate
-        ).limit_denominator(1000)
+        ratio = (TARGET_FS / sampling_rate)
+
+        from fractions import Fraction
+
+        ratio = Fraction(ratio).limit_denominator(1000)
 
         up = ratio.numerator
-
         down = ratio.denominator
 
         resampled_waveform = resample_poly(
@@ -372,15 +340,11 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
     else:
 
         resampled_waveform = filtered_history.copy()
-
         resampled_timestamps = filtered_times.copy()
 
         current_data["processed_sampling_rate"] = sampling_rate
 
-    # Update processed buffer
-    valid_indices = (
-        resampled_timestamps >= cutoff_time
-    )
+    valid_indices = resampled_timestamps >= cutoff_time
 
     current_data["processed_timestamps"] = (
         resampled_timestamps[valid_indices]
@@ -390,6 +354,66 @@ def preprocess_data(station_id, waveform, timestamps, sampling_rate):
         resampled_waveform[valid_indices]
     )
 
+
+def finish_trigger(station_id, current_data, end_timestamp):
+    """Close the current trigger and save its record."""
+
+    active_event = current_data["active_event"]
+
+    if active_event is None:
+        return
+
+    active_event["end_timestamp"] = float(end_timestamp)
+
+    active_event["duration"] = max(
+        0.0,
+        active_event["end_timestamp"] - active_event["start_timestamp"]
+    )
+
+    active_event["status"] = "ENDED"
+
+    record = {
+        "station_id": station_id,
+        "start_timestamp": active_event["start_timestamp"],
+        "end_timestamp": active_event["end_timestamp"],
+        "duration": active_event["duration"],
+        "max_sta_lta": active_event["max_sta_lta"],
+        "max_abs_amplitude": active_event["max_abs_amplitude"],
+        "status": (
+            "POSSIBLE EARTHQUAKE"
+            if MIN_EVENT_DURATION <= active_event["duration"] <= MAX_EVENT_DURATION
+            else (
+                "REJECTED - TOO SHORT"
+                if active_event["duration"] < MIN_EVENT_DURATION
+                else "REJECTED - TOO LONG"
+            )
+        )
+    }
+
+    detection_history.append(record)
+
+    if len(detection_history) > MAX_DETECTION_RECORDS:
+        detection_history.pop(0)
+
+    current_data["last_detection"] = record.copy()
+
+    print(
+        f"[{station_id}] TRIGGER ENDED | "
+        f"Duration: {record['duration']:.2f}s | "
+        f"Max ratio: {record['max_sta_lta']:.2f} | "
+        f"LTA will resume updating"
+    )
+
+    current_data["active_event"] = None
+    current_data["trigger_active"] = False
+    current_data["trigger_start_timestamp"] = None
+    current_data["trigger_duration"] = 0.0
+    current_data["trigger_max_ratio"] = 0.0
+
+    current_data["lta_frozen"] = False
+    current_data["lta_status"] = "UPDATING"
+
+    current_data["detection_status"] = "Normal"
 
 
 def run_sta_lta(station_id, new_waveform, new_timestamps, sampling_rate):
@@ -401,18 +425,18 @@ def run_sta_lta(station_id, new_waveform, new_timestamps, sampling_rate):
 
     sampling_rate = float(sampling_rate)
 
-    # Convert STA and LTA seconds into samples
     nsta = int(STA_SECONDS * sampling_rate)
-
     nlta = int(LTA_SECONDS * sampling_rate)
 
     if nsta < 1 or nlta <= nsta:
-
         raise ValueError(
             f"Invalid STA/LTA window sizes for {station_id}"
         )
 
-    # Append only new processed samples
+    new_waveform = np.asarray(new_waveform, dtype=float)
+    new_timestamps = np.asarray(new_timestamps, dtype=float)
+
+    # Keep the detector input history for dashboard/debugging.
     current_data["detector_timestamps"] = np.concatenate([
         current_data["detector_timestamps"],
         new_timestamps
@@ -423,7 +447,6 @@ def run_sta_lta(station_id, new_waveform, new_timestamps, sampling_rate):
         new_waveform
     ])
 
-    # Keep LTA context and maximum event history
     cutoff_time = (
         new_timestamps[-1] - DETECTION_HISTORY_SECONDS
     )
@@ -440,189 +463,141 @@ def run_sta_lta(station_id, new_waveform, new_timestamps, sampling_rate):
         current_data["detector_waveform"][valid_indices]
     )
 
-    detector_times = current_data["detector_timestamps"]
+    sta_value = current_data["sta_value"]
+    lta_value = current_data["lta_value"]
+    samples_seen = current_data["detector_samples_seen"]
 
-    detector_waveform = current_data["detector_waveform"]
+    alpha_sta = 1.0 / nsta
+    alpha_lta = 1.0 / nlta
 
-    # Wait until sufficient LTA history is available
-    if len(detector_waveform) <= nlta:
-        return
+    for sample, timestamp in zip(new_waveform, new_timestamps):
 
-    # Calculate recursive STA/LTA
-    characteristic_function = recursive_sta_lta(
-        detector_waveform,
-        nsta,
-        nlta
-    )
-
-    # Current STA/LTA ratio
-    current_ratio = float(characteristic_function[-1])
-
-    current_data["current_sta_lta"] = current_ratio
-
-    # Find where the newly received data starts
-    new_start_index = np.searchsorted(
-        detector_times,
-        new_timestamps[0],
-        side="left"
-    )
-
-    # Identify trigger intervals
-    trigger_intervals = trigger_onset(
-        characteristic_function,
-        TRIGGER_ON,
-        TRIGGER_OFF
-    )
-
-    # Handle an event that previously exceeded maximum duration
-    if current_data["ignore_until_below_off"]:
-
-        if current_ratio < TRIGGER_OFF:
-
-            current_data["ignore_until_below_off"] = False
-
-        else:
-
-            current_data["detection_status"] = "Normal"
-
-            return
-
-    # Process only intervals that overlap newly received samples
-    for start_index, end_index in trigger_intervals:
-
-        start_index = int(start_index)
-
-        end_index = int(end_index)
-
-        # Ignore old completed intervals
-        if end_index < new_start_index:
+        # Invalid samples must not corrupt the recursive state.
+        if not np.isfinite(sample) or not np.isfinite(timestamp):
             continue
 
-        # Ignore triggers in the initial LTA warm-up period
-        if start_index < nlta:
-            continue
+        squared_amplitude = float(sample) * float(sample)
 
-        trigger_start = float(detector_times[start_index])
-
-        trigger_end = float(detector_times[end_index])
-
-        duration = trigger_end - trigger_start
-
-        maximum_ratio = float(
-            np.max(
-                characteristic_function[
-                    start_index:end_index + 1
-                ]
-            )
+        # STA always updates, including while LTA is frozen.
+        sta_value = (
+            alpha_sta * squared_amplitude
+            + (1.0 - alpha_sta) * sta_value
         )
 
-        active_event = current_data["active_event"]
+        # LTA updates only when this station has no active trigger.
+        if not current_data["trigger_active"]:
+            lta_value = (
+                alpha_lta * squared_amplitude
+                + (1.0 - alpha_lta) * lta_value
+            )
 
-        # Start a new event if there is no active event
-        if active_event is None:
+        samples_seen += 1
 
-            active_event = {
+        # Do not trigger until a full LTA window has been observed.
+        if samples_seen <= nlta:
+            current_ratio = 0.0
+        else:
+            if lta_value > 0.0 and np.isfinite(lta_value):
+                current_ratio = sta_value / lta_value
+            else:
+                current_ratio = 0.0
+
+            if not np.isfinite(current_ratio):
+                current_ratio = 0.0
+
+        current_data["current_sta"] = float(sta_value)
+        current_data["current_lta"] = float(lta_value)
+        current_data["current_sta_lta"] = float(current_ratio)
+
+        # Trigger starts when the ratio crosses trigger-on.
+        if (
+            not current_data["trigger_active"]
+            and samples_seen > nlta
+            and current_ratio >= TRIGGER_ON
+        ):
+
+            current_data["trigger_active"] = True
+            current_data["lta_frozen"] = True
+            current_data["lta_status"] = "FROZEN"
+
+            current_data["trigger_start_timestamp"] = float(timestamp)
+            current_data["trigger_duration"] = 0.0
+            current_data["trigger_max_ratio"] = float(current_ratio)
+
+            current_data["active_event"] = {
                 "station_id": station_id,
-                "start_timestamp": trigger_start,
-                "end_timestamp": trigger_end,
-                "duration": duration,
-                "max_ratio": maximum_ratio,
-                "status": "POSSIBLE EARTHQUAKE"
+                "start_timestamp": float(timestamp),
+                "end_timestamp": float(timestamp),
+                "duration": 0.0,
+                "max_sta_lta": float(current_ratio),
+                "max_abs_amplitude": abs(float(sample)),
+                "status": "ACTIVE"
             }
 
-            current_data["active_event"] = active_event
+            current_data["detection_status"] = "Possible Earthquake"
 
-        else:
-
-            # Preserve the original start time
-            active_event["end_timestamp"] = trigger_end
-
-            active_event["duration"] = (
-                trigger_end - active_event["start_timestamp"]
+            print(
+                f"[{station_id}] TRIGGER STARTED | "
+                f"Time: {timestamp:.3f} | "
+                f"Ratio: {current_ratio:.2f} | "
+                f"Frozen LTA: {lta_value:.6e}"
             )
 
-            active_event["max_ratio"] = max(
-                active_event["max_ratio"],
-                maximum_ratio
+        elif current_data["trigger_active"]:
+
+            active_event = current_data["active_event"]
+
+            active_event["end_timestamp"] = float(timestamp)
+
+            active_event["duration"] = max(
+                0.0,
+                float(timestamp) - active_event["start_timestamp"]
             )
 
-        # Check whether the trigger has ended
-        if end_index < len(characteristic_function) - 1:
+            active_event["max_sta_lta"] = max(
+                active_event["max_sta_lta"],
+                float(current_ratio)
+            )
 
-            completed_event = current_data["active_event"]
+            active_event["max_abs_amplitude"] = max(
+                active_event["max_abs_amplitude"],
+                abs(float(sample))
+            )
 
-            completed_duration = completed_event["duration"]
+            current_data["trigger_duration"] = active_event["duration"]
 
-            if (
-                MIN_EVENT_DURATION <= completed_duration
-                <= MAX_EVENT_DURATION
-            ):
+            current_data["trigger_max_ratio"] = (
+                active_event["max_sta_lta"]
+            )
 
-                record = {
-                    "station_id": station_id,
-                    "start_timestamp": completed_event["start_timestamp"],
-                    "end_timestamp": completed_event["end_timestamp"],
-                    "duration": completed_duration,
-                    "max_sta_lta": completed_event["max_ratio"],
-                    "status": "POSSIBLE EARTHQUAKE"
-                }
-
-                detection_history.append(record)
-
-                # Keep only the latest 100 records
-                if len(detection_history) > MAX_DETECTION_RECORDS:
-
-                    detection_history.pop(0)
-
-                current_data["last_detection"] = record.copy()
-
-                print(
-                    f"POSSIBLE EARTHQUAKE: {station_id} | "
-                    f"Duration: {completed_duration:.2f}s | "
-                    f"Maximum STA/LTA: "
-                    f"{completed_event['max_ratio']:.2f}"
+            # Trigger ends when ratio reaches or falls below trigger-off.
+            if current_ratio <= TRIGGER_OFF:
+                finish_trigger(
+                    station_id,
+                    current_data,
+                    float(timestamp)
                 )
 
-            current_data["active_event"] = None
+    current_data["sta_value"] = float(sta_value)
+    current_data["lta_value"] = float(lta_value)
+    current_data["detector_samples_seen"] = samples_seen
 
-        else:
+    # Keep the displayed LTA reference synchronized with its recursive state.
+    current_data["current_sta"] = float(sta_value)
+    current_data["current_lta"] = float(lta_value)
 
-            # Trigger is still active
-            active_duration = (
-                detector_times[-1]
-                - current_data["active_event"]["start_timestamp"]
-            )
-
-            current_data["active_event"]["duration"] = active_duration
-
-            current_data["active_event"]["end_timestamp"] = (
-                float(detector_times[-1])
-            )
-
-            # Stop tracking triggers that exceed maximum duration
-            if active_duration > MAX_EVENT_DURATION:
-
-                current_data["active_event"] = None
-
-                current_data["ignore_until_below_off"] = True
-
-    # Update station detection status
-    if current_data["active_event"] is not None:
-
+    if current_data["trigger_active"]:
         current_data["detection_status"] = "Possible Earthquake"
-
+        current_data["lta_status"] = "FROZEN"
     else:
-
         current_data["detection_status"] = "Normal"
-
+        current_data["lta_status"] = "UPDATING"
 
 
 def handle_data(trace):
 
     network = trace.stats.network
-
     station = trace.stats.station
-
     channel = trace.stats.channel
 
     station_id = f"{network}.{station}.{channel}"
@@ -634,16 +609,13 @@ def handle_data(trace):
         return
 
     waveform = np.asarray(trace.data, dtype=float)
-
     timestamps = trace.times("timestamp")
-
     sampling_rate = float(trace.stats.sampling_rate)
 
     with data_lock:
 
         current_data = station_data[station_id]
 
-        # Update raw buffer
         current_data["raw_timestamps"] = np.concatenate([
             current_data["raw_timestamps"],
             timestamps
@@ -655,10 +627,8 @@ def handle_data(trace):
         ])
 
         current_data["raw_sampling_rate"] = sampling_rate
-
         current_data["latest_timestamp"] = float(timestamps[-1])
 
-        # Keep five minutes of raw data
         cutoff_time = timestamps[-1] - BUFFER_SECONDS
 
         valid_indices = (
@@ -675,7 +645,6 @@ def handle_data(trace):
 
         try:
 
-            # Step 1: Preprocess incoming data
             preprocess_data(
                 station_id,
                 waveform,
@@ -683,9 +652,7 @@ def handle_data(trace):
                 sampling_rate
             )
 
-            # Step 2: Find newly available processed samples
             processed_times = current_data["processed_timestamps"]
-
             processed_values = current_data["processed_waveform"]
 
             last_timestamp = (
@@ -693,20 +660,15 @@ def handle_data(trace):
             )
 
             if last_timestamp is None:
-
-                # On startup, only analyze the current incoming chunk
                 new_mask = (
                     processed_times >= timestamps[0] - 1.0 / TARGET_FS
                 )
-
             else:
-
                 new_mask = (
                     processed_times > last_timestamp + 1e-8
                 )
 
             new_times = processed_times[new_mask]
-
             new_values = processed_values[new_mask]
 
             if len(new_values) > 0:
@@ -715,7 +677,6 @@ def handle_data(trace):
                     float(new_times[-1])
                 )
 
-                # Step 3: Run STA/LTA
                 run_sta_lta(
                     station_id,
                     new_values,
@@ -724,7 +685,6 @@ def handle_data(trace):
                 )
 
             connection_status["status"] = "connected"
-
             connection_status["message"] = "Receiving live data"
 
             current_data["preprocessing_error"] = None
@@ -738,9 +698,7 @@ def handle_data(trace):
             )
 
 
-# --------------------------------------------------
 # SeedLink background thread
-# --------------------------------------------------
 
 def seedlink_worker():
 
@@ -752,9 +710,7 @@ def seedlink_worker():
         )
 
         client.conn.timeout = 10
-
         client.connect()
-
         client.on_data = handle_data
 
         for station in STATIONS:
@@ -771,9 +727,7 @@ def seedlink_worker():
             )
 
         with data_lock:
-
             connection_status["status"] = "connected"
-
             connection_status["message"] = "Connected, waiting for data"
 
         print(f"Connected to SeedLink: {SERVER_URL}")
@@ -785,15 +739,11 @@ def seedlink_worker():
         print("SeedLink error:", error)
 
         with data_lock:
-
             connection_status["status"] = "error"
-
             connection_status["message"] = str(error)
 
 
-# --------------------------------------------------
 # Spectrogram
-# --------------------------------------------------
 
 def calculate_spectrogram(
     waveform,
@@ -802,7 +752,6 @@ def calculate_spectrogram(
 ):
 
     if len(waveform) < 8 or sampling_rate <= 0:
-
         return {
             "times": [],
             "frequencies": [],
@@ -827,18 +776,10 @@ def calculate_spectrogram(
 
     absolute_times = start_timestamp + times
 
-    time_step = max(
-        1,
-        len(absolute_times) // 150
-    )
-
-    frequency_step = max(
-        1,
-        len(frequencies) // 100
-    )
+    time_step = max(1, len(absolute_times) // 150)
+    frequency_step = max(1, len(frequencies) // 100)
 
     absolute_times = absolute_times[::time_step]
-
     frequencies = frequencies[::frequency_step]
 
     power_db = power_db[
@@ -853,8 +794,6 @@ def calculate_spectrogram(
     }
 
 
-
-
 def get_station_output(station_id):
 
     with data_lock:
@@ -862,7 +801,6 @@ def get_station_output(station_id):
         current_data = station_data[station_id]
 
         raw_timestamps = current_data["raw_timestamps"].copy()
-
         raw_waveform = current_data["raw_waveform"].copy()
 
         processed_timestamps = (
@@ -874,15 +812,10 @@ def get_station_output(station_id):
         )
 
         raw_sampling_rate = current_data["raw_sampling_rate"]
-
-        processed_sampling_rate = (
-            current_data["processed_sampling_rate"]
-        )
-
+        processed_sampling_rate = current_data["processed_sampling_rate"]
         latest_timestamp = current_data["latest_timestamp"]
 
         detection_ratio = current_data["current_sta_lta"]
-
         detection_status = current_data["detection_status"]
 
         active_event = (
@@ -897,18 +830,22 @@ def get_station_output(station_id):
             else None
         )
 
+        lta_status = current_data["lta_status"]
+        current_sta = current_data["current_sta"]
+        current_lta = current_data["current_lta"]
+        trigger_active = current_data["trigger_active"]
+        trigger_start_timestamp = current_data["trigger_start_timestamp"]
+        trigger_duration = current_data["trigger_duration"]
+        trigger_max_ratio = current_data["trigger_max_ratio"]
+
         preprocessing_error = current_data["preprocessing_error"]
 
-    # Reduce waveform points
-    raw_step = max(
-        1,
-        len(raw_waveform) // MAX_WAVEFORM_POINTS
-    )
+        name = current_data["name"]
+        network = current_data["network"]
+        channel = current_data["channel"]
 
-    processed_step = max(
-        1,
-        len(processed_waveform) // MAX_WAVEFORM_POINTS
-    )
+    raw_step = max(1, len(raw_waveform) // MAX_WAVEFORM_POINTS)
+    processed_step = max(1, len(processed_waveform) // MAX_WAVEFORM_POINTS)
 
     raw_output = {
         "times": raw_timestamps[::raw_step].tolist(),
@@ -920,17 +857,13 @@ def get_station_output(station_id):
         "values": processed_waveform[::processed_step].tolist()
     }
 
-    # Raw spectrogram
     if len(raw_waveform) > 0:
-
         spectrogram_output = calculate_spectrogram(
             raw_waveform,
             raw_sampling_rate,
             raw_timestamps[0]
         )
-
     else:
-
         spectrogram_output = {
             "times": [],
             "frequencies": [],
@@ -941,11 +874,11 @@ def get_station_output(station_id):
 
         "station_id": station_id,
 
-        "name": current_data["name"],
+        "name": name,
 
-        "network": current_data["network"],
+        "network": network,
 
-        "channel": current_data["channel"],
+        "channel": channel,
 
         "raw_sampling_rate": raw_sampling_rate,
 
@@ -959,7 +892,7 @@ def get_station_output(station_id):
 
         "latest_timestamp": latest_timestamp,
 
-        "status": "receiving" if latest_timestamp else "waiting",
+        "status": "receiving" if latest_timestamp is not None else "waiting",
 
         "preprocessing_error": preprocessing_error,
 
@@ -981,6 +914,20 @@ def get_station_output(station_id):
 
             "nlta": int(LTA_SECONDS * processed_sampling_rate),
 
+            "sta_value": current_sta,
+
+            "lta_value": current_lta,
+
+            "lta_status": lta_status,
+
+            "trigger_active": trigger_active,
+
+            "trigger_start_timestamp": trigger_start_timestamp,
+
+            "trigger_duration": trigger_duration,
+
+            "trigger_max_ratio": trigger_max_ratio,
+
             "active_event": active_event,
 
             "last_detection": last_detection
@@ -1001,7 +948,6 @@ def get_station_output(station_id):
             "target_fs": TARGET_FS
         }
     }
-
 
 
 HTML_PAGE = """
@@ -1120,13 +1066,21 @@ HTML_PAGE = """
             color: #16a34a;
         }
 
+        .frozen-text {
+            color: #d97706;
+        }
+
+        .updating-text {
+            color: #16a34a;
+        }
+
         .detection-panel {
             margin-top: 15px;
             padding: 15px;
             background: #f8fafc;
             border-radius: 8px;
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 12px;
         }
 
@@ -1143,6 +1097,7 @@ HTML_PAGE = """
             font-size: 16px;
             font-weight: bold;
             margin-top: 5px;
+            overflow-wrap: anywhere;
         }
 
         .plot {
@@ -1204,12 +1159,16 @@ HTML_PAGE = """
             font-weight: bold;
         }
 
-        @media (min-width: 1200px) {
+        @media (max-width: 700px) {
+            .detection-panel {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
 
+        @media (min-width: 1200px) {
             .station-grid {
                 grid-template-columns: 1fr 1fr;
             }
-
         }
 
     </style>
@@ -1222,11 +1181,8 @@ HTML_PAGE = """
     <header>
 
         <div>
-
             <h1>Seismic Monitoring Dashboard</h1>
-
             <p>Live Waveform, Preprocessing and STA/LTA Detection</p>
-
         </div>
 
         <div class="connection" id="connection-status">
@@ -1238,16 +1194,11 @@ HTML_PAGE = """
 
     <div class="controls">
 
-        <label for="waveform-mode">
-            Waveform display:
-        </label>
+        <label for="waveform-mode">Waveform display:</label>
 
         <select id="waveform-mode">
-
             <option value="raw">Raw waveform</option>
-
             <option value="processed">Processed waveform</option>
-
         </select>
 
     </div>
@@ -1263,19 +1214,15 @@ HTML_PAGE = """
 
                 <h2>{{ station_id }}</h2>
 
-                <span
-                    class="station-status"
-                    id="status-{{ loop.index0 }}">
+                <span class="station-status" id="status-{{ loop.index0 }}">
                     Waiting for data
                 </span>
 
             </div>
 
-
             <div class="station-info" id="info-{{ loop.index0 }}">
                 Sampling rates: Waiting...
             </div>
-
 
             <div class="filter-info" id="filter-{{ loop.index0 }}">
                 Filter configuration: Waiting...
@@ -1283,82 +1230,68 @@ HTML_PAGE = """
 
             <div class="error" id="error-{{ loop.index0 }}"></div>
 
-
-            <div class="plot-title">
-                STA/LTA Detection
-            </div>
-
+            <div class="plot-title">STA/LTA Detection and LTA Freeze</div>
 
             <div class="detection-panel" id="detection-panel-{{ loop.index0 }}">
 
                 <div>
                     <div class="metric-label">Current STA/LTA ratio</div>
-                    <div class="metric-value" id="ratio-{{ loop.index0 }}">
-                        0.00
-                    </div>
+                    <div class="metric-value" id="ratio-{{ loop.index0 }}">0.00</div>
                 </div>
 
                 <div>
-                    <div class="metric-label">Detection status</div>
-                    <div class="metric-value" id="detection-status-{{ loop.index0 }}">
-                        Normal
-                    </div>
+                    <div class="metric-label">Trigger status</div>
+                    <div class="metric-value" id="detection-status-{{ loop.index0 }}">Normal</div>
+                </div>
+
+                <div>
+                    <div class="metric-label">LTA status</div>
+                    <div class="metric-value" id="lta-status-{{ loop.index0 }}">UPDATING</div>
+                </div>
+
+                <div>
+                    <div class="metric-label">Current STA value</div>
+                    <div class="metric-value" id="sta-value-{{ loop.index0 }}">0</div>
+                </div>
+
+                <div>
+                    <div class="metric-label">LTA reference value</div>
+                    <div class="metric-value" id="lta-value-{{ loop.index0 }}">0</div>
+                </div>
+
+                <div>
+                    <div class="metric-label">Maximum trigger ratio</div>
+                    <div class="metric-value" id="max-ratio-{{ loop.index0 }}">--</div>
                 </div>
 
                 <div>
                     <div class="metric-label">Trigger start</div>
-                    <div class="metric-value" id="trigger-start-{{ loop.index0 }}">
-                        --
-                    </div>
+                    <div class="metric-value" id="trigger-start-{{ loop.index0 }}">--</div>
                 </div>
 
                 <div>
-                    <div class="metric-label">Trigger end</div>
-                    <div class="metric-value" id="trigger-end-{{ loop.index0 }}">
-                        --
-                    </div>
-                </div>
-
-                <div>
-                    <div class="metric-label">Event duration</div>
-                    <div class="metric-value" id="duration-{{ loop.index0 }}">
-                        --
-                    </div>
+                    <div class="metric-label">Trigger duration</div>
+                    <div class="metric-value" id="duration-{{ loop.index0 }}">--</div>
                 </div>
 
                 <div>
                     <div class="metric-label">Trigger thresholds</div>
-                    <div class="metric-value" id="thresholds-{{ loop.index0 }}">
-                        4.0 / 1.5
-                    </div>
+                    <div class="metric-value" id="thresholds-{{ loop.index0 }}">4.0 / 1.5</div>
                 </div>
 
             </div>
-
 
             <div class="plot-title" id="waveform-title-{{ loop.index0 }}">
                 Raw Waveform
             </div>
 
-            <div
-                class="plot"
-                id="waveform-{{ loop.index0 }}">
-            </div>
+            <div class="plot" id="waveform-{{ loop.index0 }}"></div>
 
+            <div class="plot-title">Raw Data Spectrogram</div>
 
-            <div class="plot-title">
-                Raw Data Spectrogram
-            </div>
+            <div class="spectrogram" id="spectrogram-{{ loop.index0 }}"></div>
 
-            <div
-                class="spectrogram"
-                id="spectrogram-{{ loop.index0 }}">
-            </div>
-
-
-            <div
-                class="station-info"
-                id="timestamp-{{ loop.index0 }}">
+            <div class="station-info" id="timestamp-{{ loop.index0 }}">
                 Latest data: Waiting...
             </div>
 
@@ -1373,31 +1306,28 @@ HTML_PAGE = """
 
         <h2>Recent Detection History</h2>
 
-        <p>Completed possible earthquake detections</p>
+        <p>Completed station-level STA/LTA triggers</p>
 
         <div style="overflow-x:auto;">
 
             <table>
 
                 <thead>
-
                     <tr>
                         <th>Station</th>
                         <th>Start Time</th>
                         <th>End Time</th>
                         <th>Duration (s)</th>
                         <th>Maximum STA/LTA</th>
+                        <th>Maximum Amplitude</th>
                         <th>Status</th>
                     </tr>
-
                 </thead>
 
                 <tbody id="detection-history">
-
                     <tr>
-                        <td colspan="6">No detections recorded</td>
+                        <td colspan="7">No detections recorded</td>
                     </tr>
-
                 </tbody>
 
             </table>
@@ -1411,9 +1341,7 @@ HTML_PAGE = """
 
         const stationIds = {{ stations | list | tojson }};
 
-        const waveformMode = document.getElementById(
-            "waveform-mode"
-        );
+        const waveformMode = document.getElementById("waveform-mode");
 
 
         function formatTimestamp(timestamp) {
@@ -1422,14 +1350,11 @@ HTML_PAGE = """
                 return "--";
             }
 
-            return new Date(
-                timestamp * 1000
-            ).toLocaleString();
+            return new Date(timestamp * 1000).toLocaleString();
 
         }
 
 
-        // Initialize waveform and spectrogram plots
         function initializePlots() {
 
             stationIds.forEach((stationId, index) => {
@@ -1494,25 +1419,21 @@ HTML_PAGE = """
         }
 
 
-        // Update one station's detection information
         function updateDetection(station, index) {
 
             const detection = station.detection;
 
-            const activeEvent = detection.active_event;
+            const active = detection.trigger_active;
 
             const detected = detection.status === "Possible Earthquake";
 
-            const card = document.getElementById(
-                `card-${index}`
-            );
+            const card = document.getElementById(`card-${index}`);
 
             const panel = document.getElementById(
                 `detection-panel-${index}`
             );
 
             card.classList.toggle("detected", detected);
-
             panel.classList.toggle("detected", detected);
 
 
@@ -1528,10 +1449,29 @@ HTML_PAGE = """
                 : "metric-value normal-text";
 
 
+            const ltaStatusElement = document.getElementById(
+                `lta-status-${index}`
+            );
+
+            ltaStatusElement.textContent = detection.lta_status;
+
+            ltaStatusElement.className =
+                detection.lta_status === "FROZEN"
+                ? "metric-value frozen-text"
+                : "metric-value updating-text";
+
+
             document.getElementById(
                 `ratio-${index}`
             ).textContent = detection.ratio.toFixed(3);
 
+            document.getElementById(
+                `sta-value-${index}`
+            ).textContent = detection.sta_value.toExponential(4);
+
+            document.getElementById(
+                `lta-value-${index}`
+            ).textContent = detection.lta_value.toExponential(4);
 
             document.getElementById(
                 `thresholds-${index}`
@@ -1539,70 +1479,63 @@ HTML_PAGE = """
                 `${detection.trigger_on} / ${detection.trigger_off}`;
 
 
-            if (activeEvent) {
+            const lastDetection = detection.last_detection;
+
+            if (active) {
 
                 document.getElementById(
                     `trigger-start-${index}`
                 ).textContent = formatTimestamp(
-                    activeEvent.start_timestamp
-                );
-
-                document.getElementById(
-                    `trigger-end-${index}`
-                ).textContent = formatTimestamp(
-                    activeEvent.end_timestamp
+                    detection.trigger_start_timestamp
                 );
 
                 document.getElementById(
                     `duration-${index}`
                 ).textContent =
-                    `${activeEvent.duration.toFixed(2)} s`;
+                    `${detection.trigger_duration.toFixed(2)} s`;
+
+                document.getElementById(
+                    `max-ratio-${index}`
+                ).textContent =
+                    detection.trigger_max_ratio.toFixed(2);
+
+            } else if (lastDetection) {
+
+                document.getElementById(
+                    `trigger-start-${index}`
+                ).textContent = formatTimestamp(
+                    lastDetection.start_timestamp
+                );
+
+                document.getElementById(
+                    `duration-${index}`
+                ).textContent =
+                    `${lastDetection.duration.toFixed(2)} s`;
+
+                document.getElementById(
+                    `max-ratio-${index}`
+                ).textContent =
+                    lastDetection.max_sta_lta.toFixed(2);
 
             } else {
 
-                const lastDetection = detection.last_detection;
+                document.getElementById(
+                    `trigger-start-${index}`
+                ).textContent = "--";
 
-                if (lastDetection) {
+                document.getElementById(
+                    `duration-${index}`
+                ).textContent = "--";
 
-                    document.getElementById(
-                        `trigger-start-${index}`
-                    ).textContent = formatTimestamp(
-                        lastDetection.start_timestamp
-                    );
-
-                    document.getElementById(
-                        `trigger-end-${index}`
-                    ).textContent = formatTimestamp(
-                        lastDetection.end_timestamp
-                    );
-
-                    document.getElementById(
-                        `duration-${index}`
-                    ).textContent =
-                        `${lastDetection.duration.toFixed(2)} s`;
-
-                } else {
-
-                    document.getElementById(
-                        `trigger-start-${index}`
-                    ).textContent = "--";
-
-                    document.getElementById(
-                        `trigger-end-${index}`
-                    ).textContent = "--";
-
-                    document.getElementById(
-                        `duration-${index}`
-                    ).textContent = "--";
-
-                }
+                document.getElementById(
+                    `max-ratio-${index}`
+                ).textContent = "--";
 
             }
 
         }
 
 
-        // Update recent detection table
         function updateDetectionHistory(history) {
 
             const tableBody = document.getElementById(
@@ -1613,7 +1546,7 @@ HTML_PAGE = """
 
                 tableBody.innerHTML = `
                     <tr>
-                        <td colspan="6">No detections recorded</td>
+                        <td colspan="7">No detections recorded</td>
                     </tr>
                 `;
 
@@ -1622,7 +1555,6 @@ HTML_PAGE = """
 
             tableBody.innerHTML = "";
 
-            // Display newest detections first
             [...history].reverse().forEach(event => {
 
                 const row = document.createElement("tr");
@@ -1633,6 +1565,7 @@ HTML_PAGE = """
                     formatTimestamp(event.end_timestamp),
                     event.duration.toFixed(2),
                     event.max_sta_lta.toFixed(2),
+                    event.max_abs_amplitude.toExponential(4),
                     event.status
                 ];
 
@@ -1642,8 +1575,11 @@ HTML_PAGE = """
 
                     cell.textContent = value;
 
-                    if (index === 5) {
-                        cell.className = "possible";
+                    if (index === 6) {
+                        cell.className =
+                            event.status === "POSSIBLE EARTHQUAKE"
+                            ? "possible"
+                            : "";
                     }
 
                     row.appendChild(cell);
@@ -1657,7 +1593,6 @@ HTML_PAGE = """
         }
 
 
-        // Fetch and update dashboard
         async function updateDashboard() {
 
             try {
@@ -1692,8 +1627,6 @@ HTML_PAGE = """
                         return;
                     }
 
-
-                    // Station information
                     document.getElementById(
                         `status-${index}`
                     ).textContent = station.status;
@@ -1708,7 +1641,6 @@ HTML_PAGE = """
                         `${station.processed_sampling_rate} Hz`;
 
 
-                    // Filter configuration
                     const filter = station.filter_config;
 
                     document.getElementById(
@@ -1728,21 +1660,18 @@ HTML_PAGE = """
                         station.preprocessing_error || "";
 
 
-                    // Latest received data timestamp
                     document.getElementById(
                         `timestamp-${index}`
-                    ).textContent = station.latest_timestamp
+                    ).textContent = station.latest_timestamp !== null
                         ? `Latest data: ${formatTimestamp(
                             station.latest_timestamp
                           )}`
                         : "Latest data: Waiting...";
 
 
-                    // Update STA/LTA detection information
                     updateDetection(station, index);
 
 
-                    // Select waveform
                     const selectedWaveform =
                         waveformMode.value === "raw"
                         ? station.raw_waveform
@@ -1762,7 +1691,6 @@ HTML_PAGE = """
                     );
 
 
-                    // Update waveform
                     Plotly.react(
                         `waveform-${index}`,
                         [{
@@ -1793,7 +1721,6 @@ HTML_PAGE = """
                     );
 
 
-                    // Update spectrogram
                     const spectrogram = station.spectrogram;
 
                     const spectrogramTimes = spectrogram.times.map(
@@ -1831,7 +1758,6 @@ HTML_PAGE = """
                 });
 
 
-                // Update detection history
                 updateDetectionHistory(data.detection_history);
 
             } catch (error) {
@@ -1846,20 +1772,13 @@ HTML_PAGE = """
         }
 
 
-        waveformMode.addEventListener(
-            "change",
-            updateDashboard
-        );
-
+        waveformMode.addEventListener("change", updateDashboard);
 
         initializePlots();
 
         updateDashboard();
 
-        setInterval(
-            updateDashboard,
-            {{ update_interval }}
-        );
+        setInterval(updateDashboard, {{ update_interval }});
 
     </script>
 
@@ -1868,7 +1787,6 @@ HTML_PAGE = """
 </html>
 
 """
-
 
 
 @app.route("/")
@@ -1887,7 +1805,6 @@ def api_data():
     output = {}
 
     for station_id in station_data:
-
         output[station_id] = get_station_output(station_id)
 
     with data_lock:
