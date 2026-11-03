@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import threading
 import time
@@ -8,8 +9,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.pyplot as plt
 import numpy as np
 from flask import Flask, Response, jsonify
+from matplotlib.ticker import FuncFormatter
 from obspy import Stream, UTCDateTime
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
 from obspy.signal.trigger import classic_sta_lta, trigger_onset
@@ -17,7 +20,6 @@ from scipy.signal import hilbert
 
 from earthquake import run_location
 
-# ---------------- configuration ----------------
 SERVER_URL = "ring.wscada.net:18000"
 WEB_HOST = "0.0.0.0"
 WEB_PORT = 8001
@@ -33,32 +35,38 @@ STATIONS = [
 ]
 
 # Analysis settings
-FS = 20.0                 # analysis sampling rate (Hz)
-FMIN, FMAX = 1.0, 8.0     # bandpass for detection and picking (Hz)
-STA_P, LTA_P = 1.0, 10.0  # STA/LTA windows (s)
+FS = 20.0                
+FMIN, FMAX = 1.0, 8.0    
+STA_P, LTA_P = 1.0, 10.0 
 THR_ON, THR_OFF = 3.5, 1.5
 
 # Detection settings
-BUFFER_SEC = 300          # rolling buffer length per station (s)
-PRE_SEC = 30              # seconds kept before the first trigger
-WAIT_SEC = 40             # wait for S waves before locating (s)
-MIN_STATIONS = 3          # stations that must trigger together
-COINCIDENCE_SEC = 30      # ...within this many seconds
-DETECT_EVERY = 2.0        # seconds between detection scans
-DETECT_WINDOW = 90        # seconds of buffer scanned for triggers
-DEDUP_SEC = 60            # ignore repeated triggers from the same station (s)
-RECONNECT_SEC = 10        # SeedLink reconnect delay (s)
-ACTIVE_SEC = 60           # station is "live" if its newest sample is this young (s)
+BUFFER_SEC = 300          
+PRE_SEC = 30             
+WAIT_SEC = 40            
+MIN_STATIONS = 3         
+COINCIDENCE_SEC = 30     
+DETECT_EVERY = 2.0      
+DETECT_WINDOW = 90       
+DEDUP_SEC = 60            
+RECONNECT_SEC = 10       
+ACTIVE_SEC = 60           
+WAVEFORM_SEC = 60      
+PLOT_REFRESH = 5
 
-# Counts -> metres. Replace 1.0 with the real sensitivity if you have it,
-# otherwise the reported ML value is only a rough relative number.
 COUNTS_PER_M = 1.0
 
 MAX_LOG = 100
 MAX_EVENTS = 50
 
-# ---------------- shared state ----------------
+STATION_COLORS = [
+    "#0F766E", "#2563EB", "#7C3AED", "#92400E",
+    "#0891B2", "#4D7C0F", "#475569", "#C026D3",
+]
+
 LOCK = threading.Lock()
+PLOT_LOCK = threading.Lock()
+PLOT_CACHE = {"png": None, "time": 0.0}
 BUFFERS = {}              # "NET.STA" -> obspy Stream
 STATE = {
     "connected": False,
@@ -89,9 +97,7 @@ def buffer_copy(sid):
         return stream.copy() if stream is not None else None
 
 
-# ---------------- waveform handling ----------------
 def prepare_trace(stream, fs=FS, fmin=FMIN, fmax=FMAX):
-    """Merge, clean, filter and resample a buffered Stream to one Trace."""
     if stream is None or len(stream) == 0:
         raise ValueError("No data in buffer")
 
@@ -113,11 +119,7 @@ def prepare_trace(stream, fs=FS, fmin=FMIN, fmax=FMAX):
 
 
 def fetch_components(client, station, start, end, fs=FS, fmin=FMIN, fmax=FMAX, wait_sec=0.0):
-    """Drop-in replacement for ``get_three_components``, reading live buffers.
 
-    Only the vertical channel is available, so both the S-pick envelope and the
-    amplitude used for ML come from the vertical component.
-    """
     del client, wait_sec  # kept so this matches the get_three_components signature
 
     stream = buffer_copy(station_id(station))
@@ -135,7 +137,6 @@ def fetch_components(client, station, start, end, fs=FS, fmin=FMIN, fmax=FMAX, w
     return z, envelope, max_horizontal
 
 
-# ---------------- detection ----------------
 def latest_data_time():
     with LOCK:
         ends = [trace.stats.endtime for stream in BUFFERS.values() for trace in stream]
@@ -143,7 +144,6 @@ def latest_data_time():
 
 
 def common_end_time():
-    """Newest time that all recently active stations have in common."""
     with LOCK:
         ends = []
         for station in STATIONS:
@@ -161,7 +161,6 @@ def common_end_time():
 
 
 def find_onset(sid, now):
-    """Return the latest recent STA/LTA onset for a station, or None."""
     stream = buffer_copy(sid)
     if stream is None:
         return None
@@ -199,7 +198,6 @@ def find_onset(sid, now):
 
 
 def record_detection(sid, onset):
-    """Add a station trigger to the list shown on the website."""
     stamp = onset.timestamp
     with LOCK:
         for old in STATE["detections"]:
@@ -217,7 +215,6 @@ def record_detection(sid, onset):
 
 
 def scan_for_event(now):
-    """Look for coincident station triggers and start a location run."""
     onsets = {}
     for station in STATIONS:
         sid = station_id(station)
@@ -250,7 +247,6 @@ def scan_for_event(now):
 
 
 def detection_loop():
-    """Background thread: scan the buffers every DETECT_EVERY seconds."""
     while True:
         time.sleep(DETECT_EVERY)
         with LOCK:
@@ -272,7 +268,6 @@ def detection_loop():
             print(f"[detect] scan failed: {error}")
 
 
-# ---------------- location and results ----------------
 def print_result(result):
     if not result.get("located"):
         print(f"[result] NOT LOCATED: {result.get('error')}")
@@ -302,7 +297,6 @@ def as_float(value):
 
 
 def make_event(result, start, end):
-    """Turn a run_location result into the small record used by the website."""
     epicenter = result.get("epicenter") or {}
     latitude = as_float(epicenter.get("lat"))
     longitude = as_float(epicenter.get("lon"))
@@ -366,7 +360,6 @@ def save_result(result):
 
 
 def process_event(start):
-    """Wait for the S waves, then locate the event from the live buffers."""
     end = None
     with LOCK:
         STATE["status"] = "locating"
@@ -404,9 +397,7 @@ def process_event(start):
             STATE["status"] = "listening"
 
 
-# ---------------- SeedLink ----------------
 def on_data(trace):
-    """Called by SeedLink for every incoming packet."""
     if trace is None or trace.stats.npts == 0:
         return
 
@@ -429,12 +420,7 @@ def on_data(trace):
 
 
 def make_seedlink_client():
-    """Connect with an explicit socket timeout.
 
-    ``create_client`` connects before returning, so its timeout is still the
-    default ``None``. That makes obspy compare a float with None and fail with
-    "'<' not supported between instances of 'float' and 'NoneType'".
-    """
     client = EasySeedLinkClient(SERVER_URL, autoconnect=False)
     client.on_data = on_data
     client.conn.timeout = 10
@@ -443,7 +429,6 @@ def make_seedlink_client():
 
 
 def run_seedlink():
-    """Keep a SeedLink connection alive, reconnecting after errors."""
     while True:
         client = None
         try:
@@ -580,6 +565,104 @@ def build_status():
     }
 
 
+def make_waveform_png(window_sec=WAVEFORM_SEC):
+    with LOCK:
+        streams = {}
+        for station in STATIONS:
+            sid = station_id(station)
+            stream = BUFFERS.get(sid)
+            streams[sid] = stream.copy() if stream is not None else None
+        detections = list(STATE["detections"])
+
+    ends = [
+        max(trace.stats.endtime for trace in stream)
+        for stream in streams.values()
+        if stream is not None and len(stream) > 0
+    ]
+    end = max(ends) if ends else UTCDateTime()
+    start = end - window_sec
+
+    fig, axes = plt.subplots(
+        len(STATIONS), 1,
+        figsize=(12, max(3.2, 1.02 * len(STATIONS) + 0.7)),
+        sharex=True,
+    )
+    axes = np.atleast_1d(axes)
+
+    for index, (ax, station) in enumerate(zip(axes, STATIONS)):
+        sid = station_id(station)
+        color = STATION_COLORS[index % len(STATION_COLORS)]
+        stream = streams[sid]
+
+        ax.set_yticks([])
+        ax.tick_params(axis="y", length=0)
+        ax.grid(axis="y", visible=False)
+        ax.spines["left"].set_visible(False)
+        ax.text(0.006, 0.92, sid, transform=ax.transAxes, va="top", ha="left",
+                fontsize=9, fontweight="bold", color=color,
+                bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.8})
+
+        if stream is None or len(stream) == 0:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                    ha="center", va="center", color="#8a96a3", fontsize=9)
+            continue
+
+        try:
+            trace = prepare_trace(stream)
+            trace.trim(start, end, pad=True, fill_value=0)
+            data = trace.data.astype(float)
+        except Exception:
+            ax.text(0.5, 0.5, "not enough data", transform=ax.transAxes,
+                    ha="center", va="center", color="#8a96a3", fontsize=9)
+            continue
+
+        peak = float(np.percentile(np.abs(data), 99.5)) if len(data) else 0.0
+        if not np.isfinite(peak) or peak <= 0:
+            peak = 1.0
+
+        x = np.arange(len(data)) / trace.stats.sampling_rate + (trace.stats.starttime - end)
+        ax.plot(x, data / peak, color=color, linewidth=0.65)
+        ax.set_ylim(-1.3, 1.3)
+        ax.text(0.994, 0.92, f"peak {peak:.3g}", transform=ax.transAxes,
+                va="top", ha="right", fontsize=7.5, color="#63707d",
+                bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.8})
+
+        for detection in detections:
+            if detection["station"] != sid:
+                continue
+            detected_at = UTCDateTime(detection["t"])
+            if start <= detected_at <= end:
+                ax.axvline(detected_at - end, color="#D6361F", linewidth=1.1, alpha=0.9)
+
+    for ax in axes:
+        ax.set_xlim(-window_sec, 0)
+
+    axes[-1].xaxis.set_major_formatter(
+        FuncFormatter(lambda value, _: (end + float(value)).strftime("%H:%M:%S"))
+    )
+    axes[-1].set_xlabel("Time (UTC)")
+    fig.suptitle(f"Live waveforms, last {window_sec:g} s (red line = station trigger)",
+                 x=0.5, y=0.995, fontsize=11, fontweight="bold", color="#17212b")
+    fig.subplots_adjust(left=0.07, right=0.995, top=0.94, bottom=0.07, hspace=0.16)
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def get_waveform_png():
+    now = time.time()
+    with PLOT_LOCK:
+        if PLOT_CACHE["png"] is not None and now - PLOT_CACHE["time"] < PLOT_REFRESH:
+            return PLOT_CACHE["png"]
+
+        png = make_waveform_png()
+        PLOT_CACHE["png"] = png
+        PLOT_CACHE["time"] = now
+        return png
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -621,6 +704,7 @@ PAGE = """<!doctype html>
   details { margin-top:7px; }
   summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
   .map { display:block; width:100%; max-width:680px; margin-top:10px; border:1px solid var(--line); border-radius:6px; }
+  .waveforms { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }
   #error { display:none; margin-bottom:14px; padding:10px 13px; border:1px solid #e8b4aa;
            background:#fbeae6; color:#8a2412; border-radius:6px; }
 </style>
@@ -633,6 +717,14 @@ PAGE = """<!doctype html>
 <main>
   <div id="error"></div>
   <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Live waveforms</h2>
+    <div class="muted" style="margin-bottom:10px">
+      Last 60 seconds, normalised per station. Red lines mark station triggers.
+    </div>
+    <img id="waveforms" class="waveforms" src="/waveforms.png" alt="Live waveforms">
+  </section>
 
   <section>
     <h2>Stations</h2>
@@ -719,8 +811,16 @@ async function refresh() {
   }
 }
 
+function refreshWaveforms() {
+  const image = new Image();
+  image.onload = () => { $("waveforms").src = image.src; };
+  image.src = "/waveforms.png?t=" + Date.now();
+}
+
 refresh();
+refreshWaveforms();
 setInterval(refresh, 5000);
+setInterval(refreshWaveforms, 5000);
 </script>
 </body>
 </html>
@@ -735,6 +835,14 @@ def home():
 @app.route("/api/status")
 def api_status():
     return jsonify(build_status())
+
+
+@app.route("/waveforms.png")
+def waveforms_png():
+    try:
+        return Response(get_waveform_png(), mimetype="image/png")
+    except Exception as error:
+        return Response(f"Could not draw waveforms: {error}", status=500, mimetype="text/plain")
 
 
 @app.route("/events/<event_id>/map.png")
