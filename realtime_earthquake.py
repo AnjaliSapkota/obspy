@@ -17,7 +17,7 @@ from scipy.signal import hilbert
 
 from earthquake import run_location
 
-SERVER_URL = "ring.wscada.net:18000"
+server_url = "ring.wscada.net:18000"
 WEB_HOST = "0.0.0.0"
 WEB_PORT = 8001
 
@@ -32,23 +32,23 @@ STATIONS = [
 ]
 
 # Analysis settings
-FS = 100.0                
-FMIN, FMAX = 1.0, 8.0    
-STA_P, LTA_P = 1.0, 10.0 
-THR_ON, THR_OFF = 4, 1.5
+fs = 100.0                
+fmin, fmax = 1.0, 8.0    
+sta_p, lta_p = 1.0, 10.0 
+thr_on, thr_off = 4, 1.5
 
 # Detection settings
-BUFFER_SEC = 300          
-PRE_SEC = 30             
-WAIT_SEC = 40            
+buffer = 300          
+pre = 30             
+wait = 40            
 MIN_STATIONS = 3         
-COINCIDENCE_SEC = 30     
+coincidence = 30     
 DETECT_EVERY = 2.0      
 DETECT_WINDOW = 90       
 DEDUP_SEC = 60            
 RECONNECT_SEC = 10       
 ACTIVE_SEC = 60           
-WAVEFORM_SEC = 60      
+waveform = 60      
 PLOT_REFRESH = 5
 
 COUNTS_PER_M = 1.0
@@ -94,7 +94,7 @@ def buffer_copy(sid):
         return stream.copy() if stream is not None else None
 
 
-def prepare_trace(stream, fs=FS, fmin=FMIN, fmax=FMAX):
+def prepare_trace(stream, fs=fs, fmin=fmin, fmax=fmax):
     if stream is None or len(stream) == 0:
         raise ValueError("No data in buffer")
 
@@ -106,7 +106,7 @@ def prepare_trace(stream, fs=FS, fmin=FMIN, fmax=FMAX):
         raise ValueError("Not enough samples")
 
     trace.detrend("linear")
-    trace.taper(0.02)
+    # trace.taper(0.02)
     trace.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
 
     if abs(trace.stats.sampling_rate - fs) > 1e-6:
@@ -115,9 +115,9 @@ def prepare_trace(stream, fs=FS, fmin=FMIN, fmax=FMAX):
     return trace
 
 
-def fetch_components(client, station, start, end, fs=FS, fmin=FMIN, fmax=FMAX, wait_sec=0.0):
+def fetch_components(client, station, start, end, fs=fs, fmin=fmin, fmax=fmax, wait=0.0):
 
-    del client, wait_sec  # kept so this matches the get_three_components signature
+    del client, wait
 
     stream = buffer_copy(station_id(station))
     if stream is None:
@@ -171,21 +171,21 @@ def find_onset(sid, now):
         return None  # station data is too old to be useful
 
     trace.trim(starttime=now - DETECT_WINDOW)
-    if trace.stats.npts < int((LTA_P + 5) * FS):
+    if trace.stats.npts < int((lta_p + 5) * fs):
         return None
 
-    cft = classic_sta_lta(trace.data, int(STA_P * FS), int(LTA_P * FS))
-    onsets = trigger_onset(cft, THR_ON, THR_OFF)
+    cft = classic_sta_lta(trace.data, int(sta_p * fs), int(lta_p * fs))
+    onsets = trigger_onset(cft, thr_on, thr_off)
     if len(onsets) == 0:
         return None
 
     ignore_before = STATE["ignore_before"]
     times = []
     for onset, _ in onsets:
-        onset_time = trace.stats.starttime + onset / FS
+        onset_time = trace.stats.starttime + onset / fs
         if onset_time > now:
             continue
-        if now - onset_time > COINCIDENCE_SEC:
+        if now - onset_time > coincidence:
             continue
         if ignore_before is not None and onset_time <= ignore_before:
             continue
@@ -225,7 +225,7 @@ def scan_for_event(now):
 
     times = sorted(onsets.values())
     for index in range(len(times) - MIN_STATIONS + 1):
-        if times[index + MIN_STATIONS - 1] - times[index] > COINCIDENCE_SEC:
+        if times[index + MIN_STATIONS - 1] - times[index] > coincidence:
             continue
 
         with LOCK:
@@ -234,10 +234,10 @@ def scan_for_event(now):
             STATE["pending"] = True
             STATE["status"] = "event detected, waiting for more data"
 
-        start = times[index] - PRE_SEC
+        start = times[index] - pre
         print(f"[detect] {len(onsets)} stations triggered, first at {times[index].isoformat()}")
 
-        timer = threading.Timer(WAIT_SEC, process_event, args=(start,))
+        timer = threading.Timer(wait, process_event, args=(start,))
         timer.daemon = True
         timer.start()
         return
@@ -314,7 +314,7 @@ def make_event(result, start, end):
     return {
         "id": new_event_id(),
         "detected": fmt_time(UTCDateTime()),
-        "time": fmt_time(UTCDateTime(start) + PRE_SEC),
+        "time": fmt_time(UTCDateTime(start) + pre),
         "window_start": str(start),
         "window_end": None if end is None else str(end),
         "located": located,
@@ -342,7 +342,6 @@ def add_event(event):
 
 
 def save_result(result):
-    """Write one slim JSON file per located event (no base64 images)."""
     slim = {key: value for key, value in result.items() if key != "circle_map_png"}
     slim["stations"] = [
         {key: value for key, value in station.items() if not key.endswith("_png")}
@@ -370,8 +369,8 @@ def process_event(start):
         print(f"[locate] window {start.isoformat()} -> {end.isoformat()}")
         result = run_location(
             None, STATIONS, start, end,
-            fs=FS, fmin=FMIN, fmax=FMAX,
-            sta_p=STA_P, lta_p=LTA_P, thr_on=THR_ON, thr_off=THR_OFF,
+            fs=fs, fmin=fmin, fmax=fmax,
+            sta_p=sta_p, lta_p=lta_p, thr_on=thr_on, thr_off=thr_off,
             fetch=fetch_components,
         )
 
@@ -407,7 +406,7 @@ def on_data(trace):
         try:
             stream.merge(method=1, fill_value=0)
             newest = max(item.stats.endtime for item in stream)
-            stream.trim(starttime=newest - BUFFER_SEC)
+            stream.trim(starttime=newest - buffer)
         except Exception:
             pass
         STATE["last_data"] = time.time()
@@ -418,7 +417,7 @@ def on_data(trace):
 
 def make_seedlink_client():
 
-    client = EasySeedLinkClient(SERVER_URL, autoconnect=False)
+    client = EasySeedLinkClient(server_url, autoconnect=False)
     client.on_data = on_data
     client.conn.timeout = 10
     client.connect()
@@ -438,7 +437,7 @@ def run_seedlink():
                 STATE["status"] = "listening"
                 STATE["error"] = None
 
-            print(f"Connected to {SERVER_URL}, listening on {len(STATIONS)} stations...")
+            print(f"Connected to {server_url}, listening on {len(STATIONS)} stations...")
             client.run()
         except KeyboardInterrupt:
             raise
@@ -540,7 +539,7 @@ def build_status():
         started = STATE["started"]
 
     return {
-        "server": SERVER_URL,
+        "server": server_url,
         "now": fmt_time(UTCDateTime()),
         "status": status,
         "connected": connected,
@@ -582,7 +581,7 @@ def nice_amplitude_limit(value):
     return 10.0 * exponent
 
 
-def make_waveform_png(window_sec=WAVEFORM_SEC, stations=None):
+def make_waveform_png(window_sec=waveform, stations=None):
     stations = STATIONS if stations is None else list(stations)
     if not stations:
         raise ValueError("No stations selected")
@@ -1225,7 +1224,7 @@ def start_detection():
 
 def main():
     print("Realtime earthquake detector")
-    print(f"  SeedLink : {SERVER_URL}")
+    print(f"  SeedLink : {server_url}")
     print(f"  Website  : http://127.0.0.1:{WEB_PORT}")
     start_detection()
     threading.Thread(target=start_web_server, daemon=True).start()
