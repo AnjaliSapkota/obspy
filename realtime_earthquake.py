@@ -4,15 +4,12 @@ import json
 import threading
 import time
 from pathlib import Path
-
 import matplotlib
-
 matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
 import numpy as np
-from flask import Flask, Response, jsonify
-from matplotlib.ticker import FuncFormatter
+from flask import Flask, Response, jsonify, request
+from matplotlib.ticker import FuncFormatter, LinearLocator
 from obspy import Stream, UTCDateTime
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
 from obspy.signal.trigger import classic_sta_lta, trigger_onset
@@ -66,7 +63,7 @@ STATION_COLORS = [
 
 LOCK = threading.Lock()
 PLOT_LOCK = threading.Lock()
-PLOT_CACHE = {"png": None, "time": 0.0}
+PLOT_CACHE = {}           # tuple of station ids -> {"png", "time"}
 BUFFERS = {}              # "NET.STA" -> obspy Stream
 STATE = {
     "connected": False,
@@ -564,10 +561,35 @@ def build_status():
     }
 
 
-def make_waveform_png(window_sec=WAVEFORM_SEC):
+def format_amplitude(value, _):
+    """Format a y tick like 1.20e-6 (no zero-padded exponent)."""
+    if value == 0:
+        return "0"
+    exponent = int(np.floor(np.log10(abs(value))))
+    mantissa = value / (10.0 ** exponent)
+    return f"{mantissa:.2f}e{exponent}"
+
+
+def nice_amplitude_limit(value):
+    """Round an amplitude up to a clean tick-friendly value."""
+    if not np.isfinite(value) or value <= 0:
+        return 1.0
+    exponent = 10.0 ** np.floor(np.log10(value))
+    fraction = value / exponent
+    for step in (1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0):
+        if fraction <= step + 1e-9:
+            return step * exponent
+    return 10.0 * exponent
+
+
+def make_waveform_png(window_sec=WAVEFORM_SEC, stations=None):
+    stations = STATIONS if stations is None else list(stations)
+    if not stations:
+        raise ValueError("No stations selected")
+
     with LOCK:
         streams = {}
-        for station in STATIONS:
+        for station in stations:
             sid = station_id(station)
             stream = BUFFERS.get(sid)
             streams[sid] = stream.copy() if stream is not None else None
@@ -582,26 +604,25 @@ def make_waveform_png(window_sec=WAVEFORM_SEC):
     start = end - window_sec
 
     fig, axes = plt.subplots(
-        len(STATIONS), 1,
-        figsize=(12, max(3.2, 1.02 * len(STATIONS) + 0.7)),
+        len(stations), 1,
+        figsize=(8, max(3.6, 2.1 * len(stations) + 0.9)),
         sharex=True,
     )
     axes = np.atleast_1d(axes)
 
-    for index, (ax, station) in enumerate(zip(axes, STATIONS)):
+    for index, (ax, station) in enumerate(zip(axes, stations)):
         sid = station_id(station)
         color = STATION_COLORS[index % len(STATION_COLORS)]
         stream = streams[sid]
 
-        ax.set_yticks([])
-        ax.tick_params(axis="y", length=0)
-        ax.grid(axis="y", visible=False)
-        ax.spines["left"].set_visible(False)
+        ax.set_ylabel("Amplitude\nm/s", fontsize=8.5, labelpad=2)
+        ax.tick_params(axis="y", labelsize=8.5, pad=2)
         ax.text(0.006, 0.92, sid, transform=ax.transAxes, va="top", ha="left",
-                fontsize=9, fontweight="bold", color=color,
+                fontsize=10, fontweight="bold", color=color,
                 bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.8})
 
         if stream is None or len(stream) == 0:
+            ax.set_yticks([])
             ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
                     ha="center", va="center", color="#8a96a3", fontsize=9)
             continue
@@ -609,22 +630,21 @@ def make_waveform_png(window_sec=WAVEFORM_SEC):
         try:
             trace = prepare_trace(stream)
             trace.trim(start, end, pad=True, fill_value=0)
-            data = trace.data.astype(float)
+            data = trace.data.astype(float) / max(COUNTS_PER_M, 1e-9)
         except Exception:
+            ax.set_yticks([])
             ax.text(0.5, 0.5, "not enough data", transform=ax.transAxes,
                     ha="center", va="center", color="#8a96a3", fontsize=9)
             continue
 
-        peak = float(np.percentile(np.abs(data), 99.5)) if len(data) else 0.0
-        if not np.isfinite(peak) or peak <= 0:
-            peak = 1.0
+        peak = float(np.nanmax(np.abs(data))) if len(data) else 0.0
+        limit = nice_amplitude_limit(peak * 1.05) if np.isfinite(peak) and peak > 0 else 1e-6
 
         x = np.arange(len(data)) / trace.stats.sampling_rate + (trace.stats.starttime - end)
-        ax.plot(x, data / peak, color=color, linewidth=0.65)
-        ax.set_ylim(-1.3, 1.3)
-        ax.text(0.994, 0.92, f"peak {peak:.3g}", transform=ax.transAxes,
-                va="top", ha="right", fontsize=7.5, color="#63707d",
-                bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.8})
+        ax.plot(x, data, color=color, linewidth=0.9)
+        ax.set_ylim(-limit, limit)
+        ax.yaxis.set_major_locator(LinearLocator(5))
+        ax.yaxis.set_major_formatter(FuncFormatter(format_amplitude))
 
         for detection in detections:
             if detection["station"] != sid:
@@ -641,8 +661,8 @@ def make_waveform_png(window_sec=WAVEFORM_SEC):
     )
     axes[-1].set_xlabel("Time (UTC)")
     fig.suptitle(f"Live waveforms, last {window_sec:g} s (red line = station trigger)",
-                 x=0.5, y=0.995, fontsize=11, fontweight="bold", color="#17212b")
-    fig.subplots_adjust(left=0.07, right=0.995, top=0.94, bottom=0.07, hspace=0.16)
+                 x=0.5, y=0.995, fontsize=10.5, fontweight="bold", color="#17212b")
+    fig.subplots_adjust(left=0.135, right=0.995, top=0.95, bottom=0.075, hspace=0.28)
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=100, bbox_inches="tight")
@@ -650,15 +670,30 @@ def make_waveform_png(window_sec=WAVEFORM_SEC):
     return buffer.getvalue()
 
 
-def get_waveform_png():
+def parse_station_selection(value):
+    """Turn a 'NET.STA,NET.STA' query value into the matching station dicts."""
+    if not value:
+        return list(STATIONS)
+    wanted = {part.strip() for part in value.split(",") if part.strip()}
+    return [s for s in STATIONS if station_id(s) in wanted or s["sta"] in wanted]
+
+
+def get_waveform_png(stations=None):
+    selected = STATIONS if stations is None else list(stations)
+    key = tuple(station_id(station) for station in selected)
     now = time.time()
     with PLOT_LOCK:
-        if PLOT_CACHE["png"] is not None and now - PLOT_CACHE["time"] < PLOT_REFRESH:
-            return PLOT_CACHE["png"]
+        entry = PLOT_CACHE.get(key)
+        if entry is not None and now - entry["time"] < PLOT_REFRESH:
+            return entry["png"]
 
-        png = make_waveform_png()
-        PLOT_CACHE["png"] = png
-        PLOT_CACHE["time"] = now
+        png = make_waveform_png(stations=selected)
+        PLOT_CACHE[key] = {"png": png, "time": now}
+
+        # Keep the cache bounded when many different selections are requested.
+        if len(PLOT_CACHE) > 16:
+            oldest = min(PLOT_CACHE, key=lambda item: PLOT_CACHE[item]["time"])
+            del PLOT_CACHE[oldest]
         return png
 
 
@@ -705,7 +740,6 @@ PAGE = """<!doctype html>
   details { margin-top:7px; }
   summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
   .map { display:block; width:100%; max-width:680px; margin-top:10px; border:1px solid var(--line); border-radius:6px; }
-  .waveforms { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }
   #map { height:440px; border:1px solid var(--line); border-radius:6px; background:#e3e8ed; }
   .maphead { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
   .maphead h2 { margin:0; }
@@ -717,6 +751,7 @@ PAGE = """<!doctype html>
   .st-mark .st-label { position:absolute; left:19px; top:-1px; font-size:11.5px; font-weight:600; white-space:nowrap;
                       background:rgba(255,255,255,.9); padding:0 4px; border-radius:3px; color:var(--ink); }
   .st-mark.triggered svg { filter:drop-shadow(0 0 4px rgba(214,54,31,.95)); }
+  .st-mark.selected svg polygon { stroke:#2563eb; stroke-width:2.6; }
   .legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; color:var(--muted); font-size:12.5px; }
   .legend span { display:inline-flex; align-items:center; gap:6px; }
   .legend .tri { width:0; height:0; border-left:6px solid transparent; border-right:6px solid transparent;
@@ -725,6 +760,46 @@ PAGE = """<!doctype html>
                 box-shadow:0 0 0 1px rgba(20,32,43,.4); }
   .leaflet-popup-content { font:13px/1.45 system-ui, sans-serif; margin:10px 12px; }
   .event .head { cursor:pointer; }
+  .mapactions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+  /* right-side live waveform drawer */
+  .drawer { position:fixed; top:0; right:0; bottom:0; width:min(560px, 94vw); background:var(--panel);
+            border-left:1px solid var(--line); box-shadow:-18px 0 40px rgba(20,32,43,.18);
+            transform:translateX(105%); transition:transform .25s ease; z-index:1200;
+            display:flex; flex-direction:column; }
+  .drawer.open { transform:translateX(0); }
+  .drawerhead { display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+                padding:14px 16px; border-bottom:1px solid var(--line); }
+  .drawerhead h2 { margin:0 0 3px; }
+  .drawerbody { padding:12px 16px 18px; overflow:auto; }
+  .wavechips { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .wavechip { display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:2px 6px 2px 9px;
+              border-radius:12px; background:#eef1f4; color:var(--ink); }
+  .wavechip button { border:0; background:none; cursor:pointer; font-size:14px; line-height:1;
+                     color:var(--muted); padding:0 1px; }
+  .wavechip button:hover { color:var(--bad); }
+  #waveimg { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }
+
+  /* compare stations modal */
+  .modal-backdrop { position:fixed; inset:0; z-index:1300; background:rgba(20,32,43,.45);
+                    display:flex; align-items:center; justify-content:center; padding:18px; }
+  .modal-backdrop[hidden] { display:none; }
+  .modal { background:var(--panel); border-radius:8px; width:min(520px, 100%); max-height:85vh;
+           display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(20,32,43,.35); }
+  .modalhead, .modalfoot { display:flex; align-items:center; gap:8px; padding:13px 16px; }
+  .modalhead { justify-content:space-between; border-bottom:1px solid var(--line); }
+  .modalhead h2 { margin:0; }
+  .modalfoot { justify-content:flex-end; border-top:1px solid var(--line); }
+  .modalbody { padding:12px 16px; overflow:auto; }
+  .station-picker { display:grid; grid-template-columns:1fr 1fr; gap:4px 12px; margin-top:8px; }
+  .station-picker label { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:4px; cursor:pointer; }
+  .station-picker label:hover { background:#f4f6f8; }
+  .station-picker .sid { font-weight:600; }
+  .btn { font:inherit; font-size:13px; border-radius:5px; padding:6px 14px; cursor:pointer;
+         border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .btn.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:600; }
+  .btn.primary:hover { filter:brightness(1.05); }
+  @media (max-width:600px) { .station-picker { grid-template-columns:1fr; } }
   #error { display:none; margin-bottom:14px; padding:10px 13px; border:1px solid #e8b4aa;
            background:#fbeae6; color:#8a2412; border-radius:6px; }
 </style>
@@ -741,11 +816,15 @@ PAGE = """<!doctype html>
   <section>
     <div class="maphead">
       <h2>Station map</h2>
-      <button class="linkbtn" id="fit">Fit to map</button>
+      <div class="mapactions">
+        <button class="linkbtn" id="compare">Compare stations</button>
+        <button class="linkbtn" id="fit">Fit to map</button>
+      </div>
     </div>
     <div class="muted" style="margin-bottom:10px">
-      Triangles are stations, coloured by state. Red circles mark located epicenters &mdash;
-      click one for magnitude, coordinates and origin time. Click an event below to show it here.
+      Triangles are stations, coloured by state. Click a station to open its live waveform on the right,
+      or use <b>Compare stations</b> to pick several. Red circles mark located epicenters &mdash;
+      click one for magnitude, coordinates and origin time.
     </div>
     <div id="map"></div>
     <div class="legend">
@@ -753,14 +832,6 @@ PAGE = """<!doctype html>
       <span><i class="epi"></i>Estimated epicenter</span>
       <span class="muted" id="mapnote"></span>
     </div>
-  </section>
-
-  <section>
-    <h2>Live waveforms</h2>
-    <div class="muted" style="margin-bottom:10px">
-      Last 60 seconds, normalised per station. Red lines mark station triggers.
-    </div>
-    <img id="waveforms" class="waveforms" src="/waveforms.png" alt="Live waveforms">
   </section>
 
   <section>
@@ -785,6 +856,38 @@ PAGE = """<!doctype html>
   </section>
 </main>
 
+<aside class="drawer" id="wavepanel" aria-label="Live waveforms">
+  <div class="drawerhead">
+    <div>
+      <h2>Live waveforms</h2>
+      <div class="muted" id="wavenote"></div>
+    </div>
+    <button class="linkbtn" id="waveclose">Close</button>
+  </div>
+  <div class="drawerbody">
+    <div class="wavechips" id="wavechips"></div>
+    <img id="waveimg" alt="Live waveforms for the selected stations">
+  </div>
+</aside>
+
+<div class="modal-backdrop" id="compare-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+    <div class="modalhead">
+      <h2 id="compare-title">Compare stations</h2>
+      <button class="linkbtn" id="compare-close">Close</button>
+    </div>
+    <div class="modalbody">
+      <div class="muted">Choose the stations to show in the live waveform panel.</div>
+      <div class="station-picker" id="station-picker"></div>
+    </div>
+    <div class="modalfoot">
+      <button class="btn" id="compare-all">Select all</button>
+      <button class="btn" id="compare-none">Clear</button>
+      <button class="btn primary" id="compare-apply">Show waveforms</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => (
@@ -796,6 +899,7 @@ const isoTime = value => value ? String(value).replace("T", " ").slice(0, 19) + 
 /* ---------- map ---------- */
 const STATE_COLORS = { live:"#1f7a55", triggered:"#d6361f", stale:"#b7791f", "no data":"#9aa5b1" };
 let map = null, stationMarkers = {}, epicenterMarkers = {}, fitted = false;
+let selectedStations = new Set(), stationInfo = {}, lastStatus = null, waveRequest = 0;
 
 function initMap() {
   if (typeof L === "undefined") {
@@ -828,7 +932,8 @@ function fitMap() {
 
 function stationIcon(s) {
   const color = STATE_COLORS[s.state] || "#9aa5b1";
-  const cls = s.state === "triggered" ? " triggered" : "";
+  const cls = (s.state === "triggered" ? " triggered" : "") +
+              (selectedStations.has(s.name) ? " selected" : "");
   return L.divIcon({
     className: "", iconSize: [18, 18], iconAnchor: [9, 9],
     html: `<div class="st-mark${cls}">
@@ -858,14 +963,18 @@ function epicenterPopup(e) {
 function updateMap(d) {
   if (!map) return;
 
+  d.stations.forEach(s => { stationInfo[s.name] = s; });
+
   const placed = d.stations.filter(s => s.lat != null && s.lon != null);
   placed.forEach(s => {
     const icon = stationIcon(s), popup = stationPopup(s);
     if (stationMarkers[s.sta]) {
       stationMarkers[s.sta].setLatLng([s.lat, s.lon]).setIcon(icon).setPopupContent(popup);
     } else {
-      stationMarkers[s.sta] = L.marker([s.lat, s.lon], { icon, title: s.name })
+      const marker = L.marker([s.lat, s.lon], { icon, title: s.name })
         .addTo(map).bindPopup(popup);
+      marker.on("click", () => toggleStation(s.name));
+      stationMarkers[s.sta] = marker;
     }
   });
 
@@ -907,7 +1016,85 @@ function focusEpicenter(id) {
   $("map").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
+function stationLabel(name) {
+  return stationInfo[name] ? stationInfo[name].sta : name;
+}
+
+function selectionNote(names) {
+  return `${names.length} station${names.length === 1 ? "" : "s"} selected`;
+}
+
+function refreshStationIcons() {
+  if (!lastStatus) return;
+  lastStatus.stations.forEach(s => {
+    const marker = stationMarkers[s.sta];
+    if (marker) marker.setIcon(stationIcon(s));
+  });
+}
+
+function refreshWaveforms() {
+  const names = [...selectedStations];
+  if (!names.length) return;
+  const request = ++waveRequest;
+  const url = "/waveforms.png?stations=" + encodeURIComponent(names.join(",")) + "&t=" + Date.now();
+  const image = new Image();
+  image.onload = () => {
+    if (request === waveRequest) {
+      $("waveimg").src = image.src;
+      $("wavenote").textContent = selectionNote(names);
+    }
+  };
+  image.onerror = () => {
+    if (request === waveRequest) $("wavenote").textContent = "Could not load waveforms for the selected stations.";
+  };
+  image.src = url;
+}
+
+function renderWaveSelection() {
+  const names = [...selectedStations];
+  $("wavepanel").classList.toggle("open", names.length > 0);
+  $("wavechips").innerHTML = names.map(name => `
+    <span class="wavechip">${esc(stationLabel(name))}
+      <button type="button" data-remove="${esc(name)}" title="Remove ${esc(stationLabel(name))}">&times;</button>
+    </span>`).join("");
+  $("wavechips").querySelectorAll("[data-remove]").forEach(button => {
+    button.onclick = () => {
+      selectedStations.delete(button.dataset.remove);
+      renderWaveSelection();
+    };
+  });
+  $("wavenote").textContent = names.length ? selectionNote(names) : "";
+  if (names.length) refreshWaveforms();
+  refreshStationIcons();
+}
+
+function toggleStation(name) {
+  if (selectedStations.has(name)) selectedStations.delete(name);
+  else selectedStations.add(name);
+  renderWaveSelection();
+}
+
+function openCompare() {
+  const stations = lastStatus ? lastStatus.stations : [];
+  $("station-picker").innerHTML = stations.length ? stations.map(s => `
+    <label><input type="checkbox" value="${esc(s.name)}"${selectedStations.has(s.name) ? " checked" : ""}>
+      <span class="sid">${esc(s.sta)}</span><span class="muted">${esc(s.name)}</span></label>`).join("")
+    : `<div class="muted">The station list is not available yet.</div>`;
+  $("compare-backdrop").hidden = false;
+}
+
+function closeCompare() { $("compare-backdrop").hidden = true; }
+
+function applyCompare() {
+  selectedStations = new Set(
+    [...$("station-picker").querySelectorAll("input:checked")].map(input => input.value)
+  );
+  closeCompare();
+  renderWaveSelection();
+}
+
 function render(d) {
+  lastStatus = d;
   $("server").textContent = d.server + " · " + d.status;
   $("clock").textContent = d.now + (d.connected ? "" : " · reconnecting");
   $("error").style.display = d.error ? "block" : "none";
@@ -970,15 +1157,21 @@ async function refresh() {
   }
 }
 
-function refreshWaveforms() {
-  const image = new Image();
-  image.onload = () => { $("waveforms").src = image.src; };
-  image.src = "/waveforms.png?t=" + Date.now();
-}
+$("compare").onclick = openCompare;
+$("compare-close").onclick = closeCompare;
+$("compare-apply").onclick = applyCompare;
+$("compare-all").onclick = () =>
+  $("station-picker").querySelectorAll("input").forEach(input => input.checked = true);
+$("compare-none").onclick = () =>
+  $("station-picker").querySelectorAll("input").forEach(input => input.checked = false);
+$("compare-backdrop").addEventListener("click", event => {
+  if (event.target === $("compare-backdrop")) closeCompare();
+});
+$("waveclose").onclick = () => { selectedStations.clear(); renderWaveSelection(); };
+document.addEventListener("keydown", event => { if (event.key === "Escape") closeCompare(); });
 
 initMap();
 refresh();
-refreshWaveforms();
 setInterval(refresh, 5000);
 setInterval(refreshWaveforms, 5000);
 </script>
@@ -999,8 +1192,13 @@ def api_status():
 
 @app.route("/waveforms.png")
 def waveforms_png():
+    raw = request.args.get("stations", "")
+    stations = parse_station_selection(raw)
+    if raw and not stations:
+        return Response("No known stations in the selection", status=400, mimetype="text/plain")
     try:
-        return Response(get_waveform_png(), mimetype="image/png")
+        return Response(get_waveform_png(stations), mimetype="image/png",
+                        headers={"Cache-Control": "no-store"})
     except Exception as error:
         return Response(f"Could not draw waveforms: {error}", status=500, mimetype="text/plain")
 
