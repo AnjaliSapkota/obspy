@@ -668,6 +668,8 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Live Earthquake Monitor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   :root { --bg:#f1f4f7; --panel:#fff; --ink:#17212b; --muted:#63707d; --line:#dbe2e8;
           --ok:#1f7a55; --warn:#b7791f; --bad:#d6361f; --blue:#2563eb; }
@@ -704,6 +706,25 @@ PAGE = """<!doctype html>
   summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
   .map { display:block; width:100%; max-width:680px; margin-top:10px; border:1px solid var(--line); border-radius:6px; }
   .waveforms { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  #map { height:440px; border:1px solid var(--line); border-radius:6px; background:#e3e8ed; }
+  .maphead { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+  .maphead h2 { margin:0; }
+  .linkbtn { font:inherit; font-size:12.5px; background:none; border:1px solid var(--line); border-radius:4px;
+             padding:3px 9px; color:var(--ink); cursor:pointer; }
+  .linkbtn:hover { background:#f4f6f8; }
+  .st-mark { position:relative; }
+  .st-mark svg { display:block; filter:drop-shadow(0 0 1px rgba(20,32,43,.55)); }
+  .st-mark .st-label { position:absolute; left:19px; top:-1px; font-size:11.5px; font-weight:600; white-space:nowrap;
+                      background:rgba(255,255,255,.9); padding:0 4px; border-radius:3px; color:var(--ink); }
+  .st-mark.triggered svg { filter:drop-shadow(0 0 4px rgba(214,54,31,.95)); }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; color:var(--muted); font-size:12.5px; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+  .legend .tri { width:0; height:0; border-left:6px solid transparent; border-right:6px solid transparent;
+                border-bottom:11px solid var(--ok); }
+  .legend .epi { width:11px; height:11px; border-radius:50%; background:var(--bad); border:2px solid #fff;
+                box-shadow:0 0 0 1px rgba(20,32,43,.4); }
+  .leaflet-popup-content { font:13px/1.45 system-ui, sans-serif; margin:10px 12px; }
+  .event .head { cursor:pointer; }
   #error { display:none; margin-bottom:14px; padding:10px 13px; border:1px solid #e8b4aa;
            background:#fbeae6; color:#8a2412; border-radius:6px; }
 </style>
@@ -716,6 +737,23 @@ PAGE = """<!doctype html>
 <main>
   <div id="error"></div>
   <div class="cards" id="cards"></div>
+
+  <section>
+    <div class="maphead">
+      <h2>Station map</h2>
+      <button class="linkbtn" id="fit">Fit to map</button>
+    </div>
+    <div class="muted" style="margin-bottom:10px">
+      Triangles are stations, coloured by state. Red circles mark located epicenters &mdash;
+      click one for magnitude, coordinates and origin time. Click an event below to show it here.
+    </div>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="tri"></i>Station</span>
+      <span><i class="epi"></i>Estimated epicenter</span>
+      <span class="muted" id="mapnote"></span>
+    </div>
+  </section>
 
   <section>
     <h2>Live waveforms</h2>
@@ -753,6 +791,121 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, c => (
   {"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]
 ));
 const num = (value, digits = 1) => value == null ? "-" : Number(value).toFixed(digits);
+const isoTime = value => value ? String(value).replace("T", " ").slice(0, 19) + " UTC" : "-";
+
+/* ---------- map ---------- */
+const STATE_COLORS = { live:"#1f7a55", triggered:"#d6361f", stale:"#b7791f", "no data":"#9aa5b1" };
+let map = null, stationMarkers = {}, epicenterMarkers = {}, fitted = false;
+
+function initMap() {
+  if (typeof L === "undefined") {
+    $("map").innerHTML = '<div class="muted" style="padding:24px">The map needs internet access to load Leaflet and the map tiles.</div>';
+    $("fit").hidden = true;
+    return;
+  }
+  const street = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  });
+  const terrain = L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+    maxZoom: 17, subdomains: "abc",
+    attribution: 'Map data &copy; OpenStreetMap contributors, SRTM | Style &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
+  });
+  const satellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 18, attribution: "Tiles &copy; Esri"
+  });
+  map = L.map("map", { layers: [street] }).setView([28.2, 85.3], 7);
+  L.control.layers({ "Street": street, "Terrain": terrain, "Satellite": satellite }, null,
+                   { position: "topright" }).addTo(map);
+  $("fit").onclick = fitMap;
+}
+
+function fitMap() {
+  if (!map) return;
+  const pts = [...Object.values(stationMarkers), ...Object.values(epicenterMarkers)].map(m => m.getLatLng());
+  if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 9 });
+}
+
+function stationIcon(s) {
+  const color = STATE_COLORS[s.state] || "#9aa5b1";
+  const cls = s.state === "triggered" ? " triggered" : "";
+  return L.divIcon({
+    className: "", iconSize: [18, 18], iconAnchor: [9, 9],
+    html: `<div class="st-mark${cls}">
+      <svg width="18" height="18" viewBox="0 0 18 18">
+        <polygon points="9,1.5 16.8,16.2 1.2,16.2" fill="${color}" stroke="#fff" stroke-width="1.7"/>
+      </svg><span class="st-label">${esc(s.sta)}</span></div>`
+  });
+}
+
+function stationPopup(s) {
+  const lines = [`<b>${esc(s.name)}</b>`, `State: ${esc(s.state)}`];
+  if (s.last_sample) lines.push(`Last sample ${esc(s.last_sample)} UTC`);
+  if (s.latency_s != null) lines.push(`${num(s.latency_s)} s behind`);
+  lines.push(`<span class="muted">${num(s.lat, 4)}, ${num(s.lon, 4)}</span>`);
+  return lines.join("<br>");
+}
+
+function epicenterPopup(e) {
+  return `<b style="color:#d6361f">M ${esc(e.magnitude ?? "?")}</b><br>
+    <b>Estimated epicenter</b><br>
+    Latitude: ${num(e.lat, 4)}<br>
+    Longitude: ${num(e.lon, 4)}<br>
+    Origin time: ${esc(isoTime(e.origin_time))}<br>
+    <span class="muted">RMS ${num(e.rms_km, 2)} km &middot; ${esc(e.n_stations)} stations</span>`;
+}
+
+function updateMap(d) {
+  if (!map) return;
+
+  const placed = d.stations.filter(s => s.lat != null && s.lon != null);
+  placed.forEach(s => {
+    const icon = stationIcon(s), popup = stationPopup(s);
+    if (stationMarkers[s.sta]) {
+      stationMarkers[s.sta].setLatLng([s.lat, s.lon]).setIcon(icon).setPopupContent(popup);
+    } else {
+      stationMarkers[s.sta] = L.marker([s.lat, s.lon], { icon, title: s.name })
+        .addTo(map).bindPopup(popup);
+    }
+  });
+
+  // One red circle per located event. Clicking it opens magnitude, coordinates and origin time.
+  const located = d.events.filter(e => e.located && e.lat != null && e.lon != null);
+  const seen = new Set();
+  located.forEach(e => {
+    seen.add(e.id);
+    const popup = epicenterPopup(e);
+    if (epicenterMarkers[e.id]) {
+      epicenterMarkers[e.id].setLatLng([e.lat, e.lon]).setPopupContent(popup);
+    } else {
+      epicenterMarkers[e.id] = L.circleMarker([e.lat, e.lon], {
+        radius: 10, color: "#8a2412", weight: 2, fillColor: "#d6361f", fillOpacity: 0.85
+      }).addTo(map).bindPopup(popup);
+    }
+  });
+  Object.keys(epicenterMarkers).forEach(id => {
+    if (!seen.has(id)) {
+      map.removeLayer(epicenterMarkers[id]);
+      delete epicenterMarkers[id];
+    }
+  });
+
+  const missing = d.stations.filter(s => s.lat == null || s.lon == null).map(s => s.name);
+  $("mapnote").textContent =
+    `${d.counts.located} located event${d.counts.located === 1 ? "" : "s"} · ` +
+    `${d.counts.stations_live}/${d.counts.stations_total} stations live` +
+    (missing.length ? ` · no coordinates for ${missing.join(", ")}` : "");
+
+  if (!fitted && (placed.length || located.length)) { fitted = true; fitMap(); }
+}
+
+function focusEpicenter(id) {
+  const marker = epicenterMarkers[id];
+  if (!map || !marker) return;
+  map.setView(marker.getLatLng(), Math.max(map.getZoom(), 8));
+  marker.openPopup();
+  $("map").scrollIntoView({ behavior: "smooth", block: "center" });
+}
 
 function render(d) {
   $("server").textContent = d.server + " · " + d.status;
@@ -794,10 +947,17 @@ function render(d) {
         <td>${esc((s.p_time || "-").slice(11, 23))}</td><td>${esc((s.s_time || "-").slice(11, 23))}</td>
         <td>${esc(s.ml ?? "-")}</td></tr>`).join("")}
       </tbody></table>` : "";
-    return `<div class="event"><div class="head">${head}</div>
+    const target = e.located ? ` data-event-id="${esc(e.id)}" title="Show on map"` : "";
+    return `<div class="event"><div class="head"${target}>${head}</div>
       <div class="muted">${summary}</div>
       <details><summary>Map and station details</summary>${map}${stations}</details></div>`;
   }).join("") : `<div class="muted">No events yet.</div>`;
+
+  document.querySelectorAll("#events .head[data-event-id]").forEach(el => {
+    el.onclick = () => focusEpicenter(el.dataset.eventId);
+  });
+
+  updateMap(d);
 }
 
 async function refresh() {
@@ -816,6 +976,7 @@ function refreshWaveforms() {
   image.src = "/waveforms.png?t=" + Date.now();
 }
 
+initMap();
 refresh();
 refreshWaveforms();
 setInterval(refresh, 5000);
