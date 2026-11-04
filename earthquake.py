@@ -10,8 +10,9 @@ from quality import calculate_quality_metrics
 from waveforms import get_three_components
 
 
-def run_location( base_url, stations, start, end, fs=20.0, fmin=1.0, fmax=8.0, wait_sec=30.0, vp=6.0, vs=3.5, sta_p=1.0, lta_p=10.0, thr_on=3.5, thr_off=1.5, sta_s=1.0, lta_s=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on_s=2.5, thr_off_s=1.0, exclude_rejected=True):
-  client = Client(base_url)
+def run_location( base_url, stations, start, end, fs=100.0, fmin=1.0, fmax=8.0, wait_sec=30.0, vp=6.0, vs=3.5, sta_p=1.0, lta_p=10.0, thr_on=4, thr_off=1.5, sta_s=1.0, lta_s=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on_s=2.5, thr_off_s=1.0, exclude_rejected=True, fetch=None):
+  client = None if fetch is not None else Client(base_url)
+  get_components = fetch or get_three_components
   k = vp * vs / (vp - vs)
 
   station_results = []
@@ -22,7 +23,7 @@ def run_location( base_url, stations, start, end, fs=20.0, fmin=1.0, fmax=8.0, w
     entry = {"name": name, "lat": station["lat"], "lon": station["lon"]}
 
     try:
-      z, env, max_hor = get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec)
+      z, env, max_hor = get_components(client, station, start, end, fs, fmin, fmax, wait_sec)
       tp, cft_p, p_sta_time, p_trigger = pick_p(z, fs, start, sta_p, lta_p, thr_on, thr_off)
 
       if tp is None:
