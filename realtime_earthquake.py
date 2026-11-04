@@ -35,10 +35,10 @@ STATIONS = [
 ]
 
 # Analysis settings
-FS = 20.0                
+FS = 100.0                
 FMIN, FMAX = 1.0, 8.0    
 STA_P, LTA_P = 1.0, 10.0 
-THR_ON, THR_OFF = 3.5, 1.5
+THR_ON, THR_OFF = 4, 1.5
 
 # Detection settings
 BUFFER_SEC = 300          
@@ -467,7 +467,6 @@ app = Flask(__name__)
 
 
 def station_rows():
-    """Build the station table used by both the API and the page."""
     now = UTCDateTime()
     now_ts = time.time()
     rows = []
