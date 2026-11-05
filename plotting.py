@@ -94,7 +94,7 @@ def spectrogram_png(name, z):
   return _fig_to_png_b64(fig)
 
 
-def circle_map_png(obs, names, epicenter):
+def circle_map_png(obs, names, epicenter, title="Trilateration from S-P travel times"):
   fig, ax = plt.subplots(figsize=(7, 7))
   ang = np.linspace(0, 2 * np.pi, 360)
 
@@ -113,7 +113,7 @@ def circle_map_png(obs, names, epicenter):
   ax.set_ylabel("Latitude (°N)")
   ax.grid(True)
   ax.legend(loc="upper right", fontsize=8)
-  ax.set_title("Trilateration from S-P travel times")
+  ax.set_title(title)
 
   fig.tight_layout()
   return _fig_to_png_b64(fig)

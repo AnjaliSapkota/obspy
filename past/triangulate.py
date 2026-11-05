@@ -1,4 +1,5 @@
 from itertools import combinations
+from fractions import Fraction
 import base64
 import io
 import itertools
@@ -7,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, windows, welch
+from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert, resample_poly, windows, welch
 from scipy.optimize import least_squares
 from pyproj import Transformer, Geod
 from pathlib import Path
@@ -29,7 +30,7 @@ def fetch_waveform(station, start, end, target_fs, freqmin, freqmax):
     stream.detrend("linear")
     stream.detrend("demean")
     stream.taper(max_percentage=0.05, type="hann")
-    stream.interpolate(sampling_rate=target_fs, method="linear")
+    _anti_alias_decimate(stream, target_fs)
     stream.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=4, zerophase=True)
 
     return stream[0]
@@ -307,10 +308,10 @@ def calculate_envelope_lag(envelope_a, envelope_b, sampling_rate, max_shift_seco
     correlation = correlate(a, b, mode="full")
     lags = correlation_lags(len(a), len(b), mode="full")
 
-    norm_factor = np.sqrt(np.sum(a ** 2) * np.sum(b ** 2))
-    if norm_factor == 0:
-        raise RuntimeError("Envelope has zero energy.")
-    correlation = correlation / norm_factor
+    energy = float(np.sum(a ** 2) * np.sum(b ** 2))
+    if not np.isfinite(energy) or energy <= 0:
+        raise ValueError("Envelope has zero energy.")
+    correlation = correlation / np.sqrt(energy)
 
     lag_seconds = lags / sampling_rate
 
@@ -320,16 +321,59 @@ def calculate_envelope_lag(envelope_a, envelope_b, sampling_rate, max_shift_seco
     valid_lags = lags[valid]
 
     if len(valid_corr) == 0:
-        raise RuntimeError("No valid lag values found.")
+        raise ValueError("No valid lag values found.")
 
-    peak_index = np.argmax(valid_corr)
+    peak_index = int(np.argmax(valid_corr))
+    cc_max = float(valid_corr[peak_index])
+
+    # Refine the integer-sample peak with a parabolic fit so narrow envelopes
+    # are not quantised to the sampling interval.
+    refined_sample = float(valid_lags[peak_index])
+    if 0 < peak_index < len(valid_corr) - 1:
+        y0 = float(valid_corr[peak_index - 1])
+        y1 = float(valid_corr[peak_index])
+        y2 = float(valid_corr[peak_index + 1])
+        denominator = y0 - 2.0 * y1 + y2
+        if abs(denominator) > 1e-12:
+            offset = 0.5 * (y0 - y2) / denominator
+            refined_sample += float(np.clip(offset, -0.5, 0.5))
+
+    at_edge = peak_index in (0, len(valid_corr) - 1)
 
     return {
-        "lag": float(valid_lags[peak_index] / sampling_rate),
-        "cc_max": float(valid_corr[peak_index]),
+        "lag": float(refined_sample / sampling_rate),
+        "cc_max": cc_max,
+        "reliable": bool(cc_max >= 0.5 and not at_edge),
+        "at_max_shift": bool(at_edge),
         "lags_full": lag_seconds.tolist(),
         "cc_full": correlation.tolist(),
     }
+
+
+def _anti_alias_decimate(stream, target_fs):
+    """Resample a Stream to ``target_fs`` with an anti-aliasing FIR filter."""
+    target_fs = float(target_fs)
+    if target_fs <= 0:
+        raise ValueError("target_fs must be positive")
+
+    for trace in stream:
+        source_fs = float(trace.stats.sampling_rate)
+        if source_fs <= 0:
+            raise ValueError("Trace has an invalid sampling rate")
+        if abs(source_fs - target_fs) <= 1e-9:
+            continue
+
+        ratio = Fraction(target_fs / source_fs).limit_denominator(1000)
+        up, down = ratio.numerator, ratio.denominator
+        data = resample_poly(
+            np.asarray(trace.data, dtype=np.float64),
+            up,
+            down,
+            window=("kaiser", 8.0),
+        )
+        trace.data = data
+        trace.stats.sampling_rate = source_fs * up / down
+        trace.stats.delta = 1.0 / trace.stats.sampling_rate
 
 
 def latlon_to_xy(origin_lat, origin_lon, lat, lon):
@@ -352,29 +396,61 @@ def invert_location_velocity_geod(
     v_step=0.025,
     grid_step_deg=0.015,
     margin_deg=2.5,
+    fix_velocity=None,
+    reject_outliers=True,
 ):
+    """Grid-search and refine a source location from envelope TDOAs.
+
+    Parameters
+    ----------
+    fix_velocity : float, optional
+        If given, invert for location only with this apparent velocity.  Three
+        stations cannot identify location and velocity independently, so a
+        fixed velocity is required in that case.
+    reject_outliers : bool
+        When the velocity is free, reject station pairs whose residual is a
+        gross outlier and re-fit from the remaining pairs.
+    """
+    if len(station_latlon) < 3:
+        raise ValueError("At least three stations are required for inversion.")
+
     lats = [coord[0] for coord in station_latlon.values()]
     lons = [coord[1] for coord in station_latlon.values()]
-    
+
     lat_range = np.arange(min(lats) - margin_deg, max(lats) + margin_deg, grid_step_deg)
     lon_range = np.arange(min(lons) - margin_deg, max(lons) + margin_deg, grid_step_deg)
-    v_range = np.arange(v_min, v_max + v_step, v_step)
+    if v_max < v_min:
+        raise ValueError("v_max must be greater than or equal to v_min")
+    if fix_velocity is not None:
+        fix_velocity = float(fix_velocity)
+        if not np.isfinite(fix_velocity) or fix_velocity <= 0:
+            raise ValueError("fix_velocity must be a positive finite number")
+        velocity_grid = np.array([fix_velocity], dtype=float)
+    else:
+        # Build the velocity grid from an explicit step count so floating-point
+        # drift cannot place the last sample just outside [v_min, v_max].  A
+        # value outside the least-squares bounds makes scipy reject the grid
+        # best guess.
+        n_steps = int(np.floor((v_max - v_min) / v_step + 1e-9))
+        velocity_grid = np.clip(v_min + v_step * np.arange(n_steps + 1), v_min, v_max)
 
     LatGrid, LonGrid = np.meshgrid(lat_range, lon_range, indexing="ij")
 
     D_km = {}
     for name, (s_lat, s_lon) in station_latlon.items():
-        _, _, dist_m = geod.inv(LonGrid, LatGrid, np.full_like(LonGrid, s_lon), np.full_like(LatGrid, s_lat))
+        _, _, dist_m = geod.inv(
+            LonGrid, LatGrid, np.full_like(LonGrid, s_lon), np.full_like(LatGrid, s_lat)
+        )
         D_km[name] = dist_m / 1000.0
 
     best = {"misfit": np.inf}
     misfit_vs_v = []
 
-    for v in v_range:
+    for v in velocity_grid:
         total = np.zeros_like(LatGrid)
         for a, b, lag, cc in lag_pairs:
             pred = (D_km[a] - D_km[b]) / v
-            total += max(cc, 0.0) * (lag - pred) ** 2
+            total += max(float(cc), 0.0) * (lag - pred) ** 2
         misfit = np.sqrt(total)
 
         idx = np.unravel_index(np.argmin(misfit), misfit.shape)
@@ -388,32 +464,169 @@ def invert_location_velocity_geod(
                 "v": float(v),
             }
 
-    def residuals(p):
-        lat, lon, v = p
-        res = []
-        for a, b, lag, cc in lag_pairs:
+    def raw_vector(lat, lon, velocity, indices=None):
+        """Weighted residuals for the selected pair indices."""
+        residuals = []
+        for index, (a, b, lag, cc) in enumerate(lag_pairs):
+            if indices is not None and index not in indices:
+                continue
             _, _, da_m = geod.inv(lon, lat, station_latlon[a][1], station_latlon[a][0])
             _, _, db_m = geod.inv(lon, lat, station_latlon[b][1], station_latlon[b][0])
-            pred = ((da_m - db_m) / 1000.0) / v
-            res.append(np.sqrt(max(cc, 0.0)) * (lag - pred))
-        return res
+            predicted = ((da_m - db_m) / 1000.0) / max(velocity, 1e-9)
+            residuals.append(np.sqrt(max(float(cc), 0.0)) * (lag - predicted))
+        return residuals
 
-    refined = least_squares(
-        residuals,
-        [best["lat"], best["lon"], best["v"]],
-        bounds=([min(lat_range), min(lon_range), v_min], [max(lat_range), max(lon_range), v_max]),
+    rejected_indices = set()
+    lat_bounds = (min(lat_range), max(lat_range))
+    lon_bounds = (min(lon_range), max(lon_range))
+    x0 = [
+        float(np.clip(best["lat"], *lat_bounds)),
+        float(np.clip(best["lon"], *lon_bounds)),
+    ]
+
+    if fix_velocity is None:
+        x0.append(float(np.clip(best["v"], v_min, v_max)))
+        bounds = (
+            [lat_bounds[0], lon_bounds[0], v_min],
+            [lat_bounds[1], lon_bounds[1], v_max],
+        )
+        refined = least_squares(
+            lambda p: raw_vector(p[0], p[1], p[2]),
+            x0,
+            bounds=bounds,
+            loss="soft_l1",
+            f_scale=0.75,
+            max_nfev=300,
+        )
+
+        if reject_outliers and len(lag_pairs) > 3:
+            for _ in range(2):
+                active = [
+                    index for index in range(len(lag_pairs))
+                    if index not in rejected_indices
+                ]
+                absolute = np.array(
+                    [abs(value) for value in raw_vector(*refined.x)], dtype=float
+                )
+                inlier_absolute = absolute[active]
+                if inlier_absolute.size == 0:
+                    break
+                median = float(np.median(inlier_absolute))
+                mad = float(np.median(np.abs(inlier_absolute - median)))
+                threshold = max(0.75, median + 6.0 * max(mad, 0.05))
+                outliers = [
+                    index
+                    for index in active
+                    if absolute[index] > threshold
+                ]
+                if not outliers:
+                    break
+                rejected_indices.update(outliers)
+                remaining = [
+                    index for index in range(len(lag_pairs))
+                    if index not in rejected_indices
+                ]
+                if len(remaining) < 3:
+                    rejected_indices.difference_update(outliers)
+                    break
+                refined = least_squares(
+                    lambda p: raw_vector(p[0], p[1], p[2], set(remaining)),
+                    [
+                        float(np.clip(refined.x[0], *lat_bounds)),
+                        float(np.clip(refined.x[1], *lon_bounds)),
+                        float(np.clip(refined.x[2], v_min, v_max)),
+                    ],
+                    bounds=bounds,
+                    max_nfev=300,
+                )
+    else:
+        refined = least_squares(
+            lambda p: raw_vector(p[0], p[1], fix_velocity),
+            x0,
+            bounds=([lat_bounds[0], lon_bounds[0]], [lat_bounds[1], lon_bounds[1]]),
+            max_nfev=300,
+        )
+
+    lat_ref, lon_ref = float(refined.x[0]), float(refined.x[1])
+    v_ref = float(fix_velocity if fix_velocity is not None else refined.x[2])
+
+    # Residual norm over the pairs actually used for the final fit.
+    used_indices = (
+        {
+            index
+            for index in range(len(lag_pairs))
+            if index not in rejected_indices
+        }
+        if fix_velocity is None
+        else None
     )
-    lat_ref, lon_ref, v_ref = refined.x
+    final_residuals = raw_vector(lat_ref, lon_ref, v_ref, used_indices)
+    residual_norm = float(np.linalg.norm(final_residuals))
+
+    # A solution pinned to the edge of the search grid is a warning sign that
+    # the picks cannot be reconciled inside the array.
+    tolerance_lat = max(abs(grid_step_deg), 1e-9)
+    tolerance_lon = max(abs(grid_step_deg), 1e-9)
+    boundary_hit = bool(
+        lat_ref <= lat_bounds[0] + tolerance_lat
+        or lat_ref >= lat_bounds[1] - tolerance_lat
+        or lon_ref <= lon_bounds[0] + tolerance_lon
+        or lon_ref >= lon_bounds[1] - tolerance_lon
+    )
+
+    rejected_pairs = [
+        f"{lag_pairs[index][0]}-{lag_pairs[index][1]}"
+        for index in sorted(rejected_indices)
+    ]
 
     return {
-        "lat": float(lat_ref),
-        "lon": float(lon_ref),
-        "velocity": float(v_ref),
-        "residual_norm": float(np.linalg.norm(refined.fun)),
+        "lat": lat_ref,
+        "lon": lon_ref,
+        "velocity": v_ref,
+        "velocity_fixed": bool(fix_velocity is not None),
+        "residual_norm": residual_norm,
         "grid_best": best,
-        "v_range": v_range.tolist(),
+        "v_range": velocity_grid.tolist(),
         "misfit_vs_v": misfit_vs_v,
+        "rejected_pairs": rejected_pairs,
+        "boundary_hit": boundary_hit,
     }
+
+
+def pair_closure_scores(lag_results, station_names):
+    """Rank station pairs by the TDOA closure error of the triangles they form.
+
+    ``lag_results`` may be keyed by ``(a, b)`` tuples or ``"a-b"`` strings and
+    must contain a ``lag`` value for each pair.  Scores accumulate the absolute
+    closure error over every triangle containing the pair; larger scores
+    indicate a pair that is inconsistent with its neighbours.
+    """
+    def lookup(a, b):
+        for key in ((a, b), f"{a}-{b}"):
+            if key in lag_results:
+                value = lag_results[key]
+                return float(value["lag"] if isinstance(value, dict) else value)
+        for key in ((b, a), f"{b}-{a}"):
+            if key in lag_results:
+                value = lag_results[key]
+                return -float(value["lag"] if isinstance(value, dict) else value)
+        return None
+
+    names = sorted(station_names)
+    scores = {}
+    for x, y, z in combinations(names, 3):
+        lag_xy = lookup(x, y)
+        lag_yz = lookup(y, z)
+        lag_xz = lookup(x, z)
+        if lag_xy is None or lag_yz is None or lag_xz is None:
+            continue
+        closure = lag_xz - lag_xy - lag_yz
+        for pair in ((x, y), (y, z), (x, z)):
+            # Accumulate over every triangle containing the pair.  A pair that
+            # is itself inconsistent appears in more high-closure triangles
+            # than its neighbours, so it rises to the top of the ranking.
+            scores[pair] = scores.get(pair, 0.0) + abs(closure)
+    return scores
 
 
 def run_triangulation(
@@ -429,9 +642,17 @@ def run_triangulation(
     max_shift_seconds,
     v_step=0.025,
     grid_step_deg=0.015,
+    fix_velocity=None,
 ):
     if len(stations) < 3:
         raise ValueError("This method needs at least 3 stations.")
+
+    if fix_velocity is None and len(stations) == 3:
+        raise ValueError(
+            "With three stations, location and velocity are not jointly "
+            "identifiable. Provide fix_velocity to invert for location at a "
+            "known apparent velocity."
+        )
 
     start = UTCDateTime(start)
     end = UTCDateTime(end)
@@ -527,12 +748,13 @@ def run_triangulation(
         for a, b in pair_keys
     ]
 
-    closure_error = None
+    closure_errors = []
     for x, y, z in itertools.combinations(station_names, 3):
         value = lags[f"{x}-{z}"]["lag"] - lags[f"{x}-{y}"]["lag"] - lags[f"{y}-{z}"]["lag"]
-        if closure_error is None or abs(value) > abs(closure_error):
-            closure_error = value
-    closure_error = float(closure_error if closure_error is not None else 0.0)
+        closure_errors.append(float(value))
+    closure_error = float(
+        max(closure_errors, key=abs) if closure_errors else 0.0
+    )
 
     origin_lat = stations[0]["lat"]
     origin_lon = stations[0]["lon"]
@@ -549,6 +771,7 @@ def run_triangulation(
         v_max=v_max,
         v_step=v_step,
         grid_step_deg=grid_step_deg,
+        fix_velocity=fix_velocity,
     )
 
     source_lat = inv["lat"]
@@ -589,6 +812,9 @@ def run_triangulation(
     return {
         "pairs": pairs,
         "closure_error": float(closure_error),
+        "closure_errors": [float(value) for value in closure_errors],
+        "velocity_fixed": bool(inv.get("velocity_fixed", False)),
+        "rejected_pairs": list(inv.get("rejected_pairs") or []),
         "source": {
             "lat": float(source_lat),
             "lon": float(source_lon),
@@ -624,6 +850,7 @@ def run_triangulation(
             "v_min": float(v_min),
             "v_max": float(v_max),
             "v_step": float(v_step),
+            "fix_velocity": None if fix_velocity is None else float(fix_velocity),
         },
     }
 

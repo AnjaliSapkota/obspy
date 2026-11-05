@@ -9,7 +9,7 @@ from quality import calculate_quality_metrics
 from waveforms import get_three_components
 
 
-def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, vs, sta_p, lta_p, thr_on, thr_off, sta_s, lta_s, min_sp_sec, max_sp_sec, thr_on_s, thr_off_s, exclude_rejected=True, fetch=None):
+def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, vs, sta_p, lta_p, thr_on, thr_off, sta_s, lta_s, min_sp_sec, max_sp_sec, thr_on_s, thr_off_s, exclude_rejected=True, fetch=None, station_plots=True):
   client = None if fetch is not None else Client(base_url)
   get_components = fetch or get_three_components
   k = vp * vs / (vp - vs)
@@ -36,8 +36,9 @@ def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, v
       if ts is None:
         entry["error"] = (f"No S trigger found in window (P at {tp.isoformat()[11:23]})")
         entry["quality"] = "REJECT"
-        entry["waveform_png"] = waveform_stalta_png(name, z, env, cft_p, cft_s, tp, None, p_sta_time, None, thr_on, thr_off, thr_on_s, thr_off_s)
-        entry["spectrogram_png"] = spectrogram_png(name, z)
+        if station_plots:
+            entry["waveform_png"] = waveform_stalta_png(name, z, env, cft_p, cft_s, tp, None, p_sta_time, None, thr_on, thr_off, thr_on_s, thr_off_s)
+            entry["spectrogram_png"] = spectrogram_png(name, z)
         station_results.append(entry)
         continue
 
@@ -53,9 +54,15 @@ def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, v
           "_trace_starttime": z.stats.starttime,
           "_env": env,
           "_max_hor": max_hor,
-          "waveform_png": waveform_stalta_png(name, z, env, cft_p, cft_s, tp, ts, p_sta_time, s_sta_time, thr_on, thr_off, thr_on_s, thr_off_s,),
-          "spectrogram_png": spectrogram_png(name, z), **q_info,
+          **q_info,
       })
+
+      if station_plots:
+          entry["waveform_png"] = waveform_stalta_png(
+              name, z, env, cft_p, cft_s, tp, ts, p_sta_time, s_sta_time,
+              thr_on, thr_off, thr_on_s, thr_off_s,
+          )
+          entry["spectrogram_png"] = spectrogram_png(name, z)
 
       if exclude_rejected and entry.get("quality") == "REJECT":
         entry.setdefault("quality_notes", []).append(
@@ -131,16 +138,19 @@ def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, v
             except Exception:
               pass
 
-            ml_val = calculate_ml(
-                amplitude=peak_amp_nms,
-                period=period,
-                delta_km=epi_dist,
-                station_correction=0.0,
-            )
-            entry["amplitude"] = peak_amp_nms
-            entry["period"] = period
-            entry["ml"] = round(ml_val, 2)
-            station_magnitudes.append(ml_val)
+            try:
+                ml_val = calculate_ml(
+                    amplitude=peak_amp_nms,
+                    period=period,
+                    delta_km=epi_dist,
+                    station_correction=0.0,
+                )
+                entry["amplitude"] = peak_amp_nms
+                entry["period"] = period
+                entry["ml"] = round(ml_val, 2)
+                station_magnitudes.append(ml_val)
+            except Exception:
+                pass
 
       _clean_private_fields(station_results)
       avg_origin_time = UTCDateTime(

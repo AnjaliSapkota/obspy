@@ -20,8 +20,7 @@ from scipy.signal import butter, correlate, correlation_lags, filtfilt, hilbert,
 
 SERVER_HOST = "ring.wscada.net"
 SERVER_PORT = 18000
-FDSN_URL = "https://seiscomp.alertnepal.online"   # only used to look up missing station coordinates
-
+FDSN_URL = "https://seiscomp.alertnepal.online" 
 # lat/lon are needed for the map. Stations with lat/lon = None are looked up from the FDSN
 # service at startup; if that fails they are simply left off the map.
 STATIONS = [
@@ -308,7 +307,9 @@ def analyze_candidate(group, traces, envelopes, end):
 
     segments = {}
     for name in names:
-        tr = traces[name]
+        tr = traces.get(name)
+        if tr is None:
+            continue
         fs = tr.stats.sampling_rate
         i0 = max(0, int((t0 - tr.stats.starttime) * fs))
         i1 = min(tr.stats.npts, int((t1 - tr.stats.starttime) * fs))
@@ -714,7 +715,7 @@ def processing_loop():
                 STATE.update(id=STATE["id"] + 1, updated=fmt_time(UTCDateTime()), updated_ts=now,
                              error=None, stations=result["stations"],
                              cycle_seconds=round(time.time() - started, 1))
-                save_history()
+            save_history()
         except Exception as error:
             print(f"  cycle failed: {error}")
             with STATE_LOCK:
@@ -1224,7 +1225,7 @@ def plot(name):
 
 if __name__ == "__main__":
     load_history()
-    threading.Thread(target=fill_missing_coordinates, daemon=True).start()
+    fill_missing_coordinates()
     threading.Thread(target=processing_loop, daemon=True).start()
     print(f"Open http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)

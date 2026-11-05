@@ -49,13 +49,16 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
   st.merge(method=1, fill_value="interpolate")
   st.detrend("linear")
   st.detrend("demean")
-  st.taper(max_percentage=0.05, type="hann", side = "left")
+  st.taper(max_percentage=0.05, type="hann", side="left")
   st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
   st.interpolate(sampling_rate=fs, method="linear")
 
   t0 = max(tr.stats.starttime for tr in st)
   t1 = min(tr.stats.endtime for tr in st)
   st.trim(t0, t1)
+
+  if len(st) == 0 or min(tr.stats.npts for tr in st) < 1:
+    raise RuntimeError("No overlapping data after trimming to common window")
 
   n = min(tr.stats.npts for tr in st)
   for tr in st:
@@ -79,6 +82,6 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
 
   # Component-wise maximum horizontal trace for ML calculation
   h_abs_data = [np.abs(tr.data.astype(float)) for tr in hors]
-  max_hor_trace = np.maximum(h_abs_data[0], h_abs_data[1])
+  max_hor_trace = np.maximum.reduce(h_abs_data)
 
   return z, env, max_hor_trace

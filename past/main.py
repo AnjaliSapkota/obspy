@@ -2,7 +2,7 @@ from flask import Flask, jsonify, render_template_string, request
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 import earthquake as core_sta
-import triangulate as core_tdoa
+import past.triangulate as core_tdoa
 
 app = Flask(__name__)
 

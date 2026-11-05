@@ -4,9 +4,22 @@ from scipy.stats import kurtosis
 
 def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_trigger):
 
+  if fs <= 0:
+    raise ValueError("fs must be positive")
+  if len(z.data) == 0:
+    raise ValueError("z contains no data")
+  if len(env) == 0:
+    raise ValueError("env is empty")
+
   t0 = z.stats.starttime
   p_idx = int((p_time - t0) * fs)
   s_idx = int((s_time - t0) * fs)
+  if not (0 <= p_idx < len(z.data)):
+    raise ValueError("p_time is outside the trace time range")
+  if not (0 <= s_idx < len(env)):
+    raise ValueError("s_time is outside the envelope time range")
+  if s_time <= p_time:
+    raise ValueError("s_time must be after p_time")
 
   p_window = int(5.0 * fs)
   s_window = int(5.0 * fs)
@@ -18,7 +31,7 @@ def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_t
   s1 = min(len(env), s_idx + s_window // 2)
 
   pz = z.data[p0:p1].astype(float)
-  sz = z.data[s0:s1].astype(float)
+  sz = env[s0:s1].astype(float)
 
   if len(pz) < 10 or len(sz) < 10:
     raise RuntimeError("Not enough samples for quality analysis")
@@ -45,9 +58,9 @@ def calculate_quality_metrics(z, env, fs, p_time, s_time, p_sta_trigger, s_sta_t
     checks.append("S-P interval is very short")
   if sp > 50.0:
     checks.append("S-P interval exceeds search range")
-  if p_sta_trigger < 3.0:
+  if p_sta_trigger < 3.5:
     checks.append("Weak P STA/LTA trigger")
-  if s_sta_trigger < 2.0:
+  if s_sta_trigger < 2.5:
     checks.append("Weak S STA/LTA trigger")
   if p_outliers > 0.15:
     checks.append("P window contains many outliers")

@@ -3,7 +3,14 @@ from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 
 
 def aic_pick(trace_data, fs, approximate_idx, search_before=1.0, search_after=0.5, max_shift_sec=0.5):
+  trace_data = np.asarray(trace_data, dtype=float)
   n = len(trace_data)
+  if n == 0:
+    raise ValueError("trace_data is empty")
+  if fs <= 0:
+    raise ValueError("fs must be positive")
+  if not (0 <= approximate_idx < n):
+    raise ValueError("approximate_idx out of bounds")
   i0 = max(1, approximate_idx - int(search_before * fs))
   i1 = min(n - 2, approximate_idx + int(search_after * fs))
 
@@ -39,6 +46,13 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=1.0, search_after=0.
   return pick_idx
 
 def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=1.0, aic_after=0.5):
+  if fs <= 0:
+    raise ValueError("fs must be positive")
+  if len(z.data) == 0:
+    raise ValueError("z contains no data")
+  start_idx = int((start - z.stats.starttime) * fs)
+  if not (0 <= start_idx < len(z.data)):
+    raise ValueError("start is outside the trace time range")
   nsta = int(sta * fs)
   nlta = int(lta * fs)
   cft = recursive_sta_lta(z.data, nsta, nlta)
@@ -64,11 +78,17 @@ def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=
   return p_time_aic, cft, p_time_sta, trigger_value
 
 
-def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=1.0, max_sp_sec=120.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
+def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=1.0, max_sp_sec=60.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
+  if fs <= 0:
+    raise ValueError("fs must be positive")
+  if len(env) == 0:
+    raise ValueError("env is empty")
+  p_idx = int((p_time - t0) * fs)
+  if not (0 <= p_idx < len(env)):
+    raise ValueError("p_time is outside the envelope time range")
   nsta = max(1, int(sta * fs))
   nlta = max(nsta + 1, int(lta * fs))
   cft = recursive_sta_lta(env, nsta, nlta)
-  p_idx = int((p_time - t0) * fs)
 
   i0 = p_idx + int(min_sp_sec * fs)
   i1 = min(p_idx + int(max_sp_sec * fs), len(cft) - 1)
@@ -78,12 +98,12 @@ def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=1.0, max_sp_sec=120
 
   s_idx = None
   for on, off in trigger_onset(cft, thr_on, thr_off):
-    if on < i0 <= off:
-      s_idx = int(i0)
-      break
-    if i0 <= on <= i1:
-      s_idx = int(on)
-      break
+    if on > i1:
+      break  # triggers are time-ordered; nothing left in window
+    if on < i0:
+      continue  # trigger started at/before P: still the P coda, not S
+    s_idx = int(on)
+    break
 
   if s_idx is None:
     return None, cft, None, None

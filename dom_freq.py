@@ -2,7 +2,7 @@
 import numpy as np
 from obspy import UTCDateTime
 from scipy.signal import butter, sosfiltfilt, hilbert, welch
-from triangulate import fetch_waveform, trim_to_common_window
+from past.triangulate import fetch_waveform, trim_to_common_window
 from itertools import combinations
 from obspy.geodetics import gps2dist_azimuth
 
