@@ -16,6 +16,7 @@ from obspy.signal.trigger import classic_sta_lta, trigger_onset
 from scipy.signal import hilbert
 
 from earthquake import run_location
+from historical import create_blueprint as create_historical_blueprint
 
 server_url = "ring.wscada.net:18000"
 WEB_HOST = "0.0.0.0"
@@ -36,6 +37,14 @@ fs = 100.0
 fmin, fmax = 1.0, 8.0    
 sta_p, lta_p = 1.0, 10.0 
 thr_on, thr_off = 4, 1.5
+
+# Location / S-pick settings
+wait_sec = 10.0      # FDSN fetch pad (unused by the live-buffer fetcher)
+VP = 6.0             # P-wave velocity (km/s)
+VS = 3.5             # S-wave velocity (km/s)
+sta_s, lta_s = 1.0, 8.0      # S STA/LTA
+min_sp_sec, max_sp_sec = 1.0, 60.0   # S-P search window (s)
+thr_on_s, thr_off_s = 2.5, 1.0   # S trigger thresholds
 
 # Detection settings
 buffer = 300          
@@ -370,7 +379,12 @@ def process_event(start):
         result = run_location(
             None, STATIONS, start, end,
             fs=fs, fmin=fmin, fmax=fmax,
+            wait_sec=wait_sec,
+            vp=VP, vs=VS,
             sta_p=sta_p, lta_p=lta_p, thr_on=thr_on, thr_off=thr_off,
+            sta_s=sta_s, lta_s=lta_s,
+            min_sp_sec=min_sp_sec, max_sp_sec=max_sp_sec,
+            thr_on_s=thr_on_s, thr_off_s=thr_off_s,
             fetch=fetch_components,
         )
 
@@ -460,6 +474,7 @@ def run_seedlink():
 
 # ---------------- website ----------------
 app = Flask(__name__)
+app.register_blueprint(create_historical_blueprint(STATIONS))
 
 
 def station_rows():
@@ -806,7 +821,10 @@ PAGE = """<!doctype html>
 <body>
 <header>
   <div><h1>Live Earthquake Monitor</h1><div class="muted" id="server">Connecting...</div></div>
-  <div class="muted" id="clock">Loading...</div>
+  <div class="muted" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+    <a class="linkbtn" href="/historical/">Historical detection</a>
+    <span id="clock">Loading...</span>
+  </div>
 </header>
 <main>
   <div id="error"></div>
@@ -820,11 +838,7 @@ PAGE = """<!doctype html>
         <button class="linkbtn" id="fit">Fit to map</button>
       </div>
     </div>
-    <div class="muted" style="margin-bottom:10px">
-      Triangles are stations, coloured by state. Click a station to open its live waveform on the right,
-      or use <b>Compare stations</b> to pick several. Red circles mark located epicenters &mdash;
-      click one for magnitude, coordinates and origin time.
-    </div>
+   
     <div id="map"></div>
     <div class="legend">
       <span><i class="tri"></i>Station</span>
