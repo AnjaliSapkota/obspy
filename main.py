@@ -122,6 +122,23 @@ def run_tdoa():
         if v_min <= 0 or v_min >= v_max:
             raise ValueError("Min velocity must be positive and smaller than max velocity.")
 
+        # Three stations cannot identify location and apparent velocity
+        # independently.  Keep the legacy three-station workflow usable by
+        # fixing the velocity at the midpoint of the requested range (or at an
+        # explicitly supplied prior) and report that clearly.
+        fix_velocity = p.get("fix_velocity")
+        fixed_note = None
+        if len(p["stations"]) == 3:
+            fix_velocity = float(
+                fix_velocity if fix_velocity is not None else 0.5 * (v_min + v_max)
+            )
+            if not v_min <= fix_velocity <= v_max:
+                raise ValueError("Fixed velocity must lie inside the velocity range.")
+            fixed_note = (
+                f"Only three stations were used; velocity was fixed at "
+                f"{fix_velocity:.2f} km/s, so the source location is indicative only."
+            )
+
         result = core_tdoa.run_triangulation(
             stations=p["stations"],
             start=UTCDateTime(p["start"]),
@@ -133,7 +150,10 @@ def run_tdoa():
             max_shift_seconds=float(p["max_shift"]),
             v_min=v_min,
             v_max=v_max,
+            fix_velocity=fix_velocity,
         )
+        if fixed_note:
+            result["warning"] = fixed_note
         return jsonify(**result)
     except ValueError as e:
         return jsonify(error=str(e)), 400

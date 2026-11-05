@@ -1,7 +1,6 @@
 import numpy as np
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-
 from location import locate_epicenter_lsq
 from magnitude import calculate_epicentral_distance, calculate_ml
 from pickers import pick_p, pick_s
@@ -10,7 +9,7 @@ from quality import calculate_quality_metrics
 from waveforms import get_three_components
 
 
-def run_location( base_url, stations, start, end, fs=100.0, fmin=1.0, fmax=8.0, wait_sec=30.0, vp=6.0, vs=3.5, sta_p=1.0, lta_p=10.0, thr_on=4, thr_off=1.5, sta_s=1.0, lta_s=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on_s=2.5, thr_off_s=1.0, exclude_rejected=True, fetch=None):
+def run_location(base_url, stations, start, end, fs, fmin, fmax, wait_sec, vp, vs, sta_p, lta_p, thr_on, thr_off, sta_s, lta_s, min_sp_sec, max_sp_sec, thr_on_s, thr_off_s, exclude_rejected=True, fetch=None):
   client = None if fetch is not None else Client(base_url)
   get_components = fetch or get_three_components
   k = vp * vs / (vp - vs)

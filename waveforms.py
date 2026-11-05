@@ -1,10 +1,6 @@
 import numpy as np
 
-
-def get_three_components(
-    client, station, start, end, fs, fmin, fmax, wait_sec
-):
-  """Fetches 3-component seismic waveforms, normalizes gain/response to m/s, and filters signals."""
+def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
   st = client.get_waveforms(
       network=station["net"],
       station=station["sta"],
@@ -53,7 +49,7 @@ def get_three_components(
   st.merge(method=1, fill_value="interpolate")
   st.detrend("linear")
   st.detrend("demean")
-  st.taper(max_percentage=0.05, type="hann")
+  st.taper(max_percentage=0.05, type="hann", side = "left")
   st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
   st.interpolate(sampling_rate=fs, method="linear")
 

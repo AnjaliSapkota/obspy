@@ -15,7 +15,6 @@ def xy_to_latlon(x, y, lat0, lon0):
 
 
 def locate_epicenter_lsq(obs, source_depth_km=0.0):
-  """Solves for 2D epicenter using non-linear least squares trilateration."""
   n = len(obs)
   if n < 3:
     raise ValueError("Need at least 3 stations")

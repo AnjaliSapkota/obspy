@@ -2,8 +2,7 @@ import numpy as np
 from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 
 
-def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.0):
-  """Refines approximate STA/LTA pick index using Akaike Information Criterion (AIC)."""
+def aic_pick(trace_data, fs, approximate_idx, search_before=1.0, search_after=0.5, max_shift_sec=0.5):
   n = len(trace_data)
   i0 = max(1, approximate_idx - int(search_before * fs))
   i1 = min(n - 2, approximate_idx + int(search_after * fs))
@@ -25,11 +24,21 @@ def aic_pick(trace_data, fs, approximate_idx, search_before=2.0, search_after=4.
   if not np.any(valid):
     return approximate_idx
 
-  local_idx = np.nanargmin(aic)
-  return int(i0 + local_idx)
+  local_idx = int(np.nanargmin(aic))
 
-def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=2.0, aic_after=4.0):
-  """Detects P-phase arrival using recursive STA/LTA + AIC on vertical Z component."""
+  # A minimum at the edge of the search window usually means the real onset
+  # lies outside it.  Keep the STA trigger in that case.
+  edge = max(2, int(0.05 * len(x)))
+  if local_idx < edge or local_idx >= len(x) - edge:
+    return approximate_idx
+
+  pick_idx = i0 + local_idx
+  if abs(pick_idx - approximate_idx) > max_shift_sec * fs:
+    return approximate_idx
+
+  return pick_idx
+
+def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=1.0, aic_after=0.5):
   nsta = int(sta * fs)
   nlta = int(lta * fs)
   cft = recursive_sta_lta(z.data, nsta, nlta)
@@ -45,7 +54,8 @@ def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=
     return None, cft, None, None
 
   p_idx_aic = aic_pick(
-      z.data, fs, p_idx, search_before=aic_before, search_after=aic_after
+      z.data, fs, p_idx, search_before=aic_before, search_after=aic_after,
+      max_shift_sec=0.5,
   )
   p_time_sta = z.stats.starttime + p_idx / fs
   p_time_aic = z.stats.starttime + p_idx_aic / fs
@@ -54,8 +64,7 @@ def pick_p(z, fs, start, sta=1.0, lta=10.0, thr_on=3.5, thr_off=1.5, aic_before=
   return p_time_aic, cft, p_time_sta, trigger_value
 
 
-def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=4.0, max_sp_sec=120.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
-  """Detects S-phase arrival on horizontal envelope using recursive STA/LTA + AIC."""
+def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=1.0, max_sp_sec=120.0, thr_on=2.5, thr_off=1.0, aic_before=1.5, aic_after=4.0):
   nsta = max(1, int(sta * fs))
   nlta = max(nsta + 1, int(lta * fs))
   cft = recursive_sta_lta(env, nsta, nlta)
@@ -68,7 +77,10 @@ def pick_s(env, fs, t0, p_time, sta=1.0, lta=8.0, min_sp_sec=4.0, max_sp_sec=120
     return None, cft, None, None
 
   s_idx = None
-  for on, _off in trigger_onset(cft, thr_on, thr_off):
+  for on, off in trigger_onset(cft, thr_on, thr_off):
+    if on < i0 <= off:
+      s_idx = int(i0)
+      break
     if i0 <= on <= i1:
       s_idx = int(on)
       break
