@@ -1,4 +1,9 @@
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+_INVENTORY_CACHE = {}
+
 
 def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
   st = client.get_waveforms(
@@ -15,18 +20,27 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
 
   # Remove instrument response or apply raw digitizer count scaling
   try:
-    inv = client.get_stations(
-        network=station["net"],
-        station=station["sta"],
-        location=station["loc"],
-        channel=station["cha"][:2] + "?",
-        level="response",
-    )
+    inv_key = (station["net"], station["sta"], station["loc"], station["cha"][:2])
+    inv = _INVENTORY_CACHE.get(inv_key)
+    if inv is None:
+      inv = client.get_stations(
+          network=station["net"],
+          station=station["sta"],
+          location=station["loc"],
+          channel=station["cha"][:2] + "?",
+          level="response",
+      )
+      _INVENTORY_CACHE[inv_key] = inv
     st.remove_response(inventory=inv, output="VEL")
-  except Exception:
+  except Exception as exc:
+    logger.warning(
+        f"Failed to remove response for {station['sta']}: {exc}. "
+        "Using raw digitizer counts."
+    )
     for tr in st:
       if np.max(np.abs(tr.data)) > 10.0:
         tr.data = tr.data.astype(float) / 1e8
+
 
   zs = st.select(component="Z")
   if len(zs) == 0:
@@ -48,10 +62,10 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
 
   st.merge(method=1, fill_value="interpolate")
   st.detrend("linear")
-  st.detrend("demean")
   st.taper(max_percentage=0.05, type="hann", side="left")
   st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=4, zerophase=True)
-  st.interpolate(sampling_rate=fs, method="linear")
+  if any(not np.isclose(tr.stats.sampling_rate, fs) for tr in st):
+    st.interpolate(sampling_rate=fs, method="linear",)
 
   t0 = max(tr.stats.starttime for tr in st)
   t1 = min(tr.stats.endtime for tr in st)
@@ -74,14 +88,18 @@ def get_three_components(client, station, start, end, fs, fmin, fmax, wait_sec):
   if len(hors) < 2:
     raise RuntimeError("Need two horizontal components for S-picking")
 
-  # Vector envelope for picking
-  hor_energy = np.zeros(n, dtype=float)
-  for tr in hors:
-    hor_energy += tr.data.astype(float) ** 2
-  env = np.sqrt(hor_energy)
+  # Convert horizontal data to floating point once.
+  north = np.asarray(hors[0].data, dtype=float)
+  east = np.asarray(hors[1].data, dtype=float)
 
-  # Component-wise maximum horizontal trace for ML calculation
-  h_abs_data = [np.abs(tr.data.astype(float)) for tr in hors]
-  max_hor_trace = np.maximum.reduce(h_abs_data)
+  # Horizontal vector envelope.
+  env = np.hypot(north, east)
+
+  # Maximum absolute horizontal amplitude.
+  max_hor_trace = np.abs(north).copy()
+  temp = np.empty_like(max_hor_trace)
+
+  np.abs(east, out=temp)
+  np.maximum(max_hor_trace, temp, out=max_hor_trace)
 
   return z, env, max_hor_trace
