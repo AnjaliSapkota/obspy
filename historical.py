@@ -994,7 +994,6 @@ PAGE = """<!doctype html>
 <body>
 <header>
   <div><h1>Historical Earthquake Detection</h1>
-    <div class="muted">Scan archived FDSN data for triggers, then locate events.</div></div>
   <a class="navbtn" href="/">Live monitor &rarr;</a>
 </header>
 <main>
@@ -1002,11 +1001,7 @@ PAGE = """<!doctype html>
     <form id="run-form">
       <label>Start (UTC) <input type="datetime-local" id="start" step="1"></label>
       <label>End (UTC) <input type="datetime-local" id="end" step="1"></label>
-      <div class="quick">
-        <button type="button" data-hours="1">1 h</button>
-        <button type="button" data-hours="6">6 h</button>
-        <button type="button" data-hours="24">24 h</button>
-      </div>
+
       <fieldset>
         <legend>Stations</legend>
         <div class="stations" id="station-list"></div>
@@ -1037,7 +1032,6 @@ PAGE = """<!doctype html>
     <section><div class="cards" id="cards"></div></section>
     <section><h2>Map</h2><div id="map"></div></section>
     <section><h2>Detected events</h2>
-      <div class="muted" style="margin-bottom:8px">Located from P arrival times; S times are predicted from the best-fit epicenter. Magnitude is approximate because archived data are used as counts, not response-corrected velocity.</div>
       <div id="events"><div class="muted">No events yet.</div></div></section>
     <section><h2>Station triggers</h2><div id="triggers"><div class="muted">No triggers yet.</div></div></section>
   </div>
