@@ -575,8 +575,8 @@ def build_status():
     }
 
 
-def format_amplitude(value, _):
-    """Format a y tick like 1.20e-6 (no zero-padded exponent)."""
+def format_amplitude(value, _=None):
+    """Format an amplitude like 1.20e-6 (no zero-padded exponent)."""
     if value == 0:
         return "0"
     exponent = int(np.floor(np.log10(abs(value))))
@@ -584,16 +584,19 @@ def format_amplitude(value, _):
     return f"{mantissa:.2f}e{exponent}"
 
 
-def nice_amplitude_limit(value):
-    """Round an amplitude up to a clean tick-friendly value."""
-    if not np.isfinite(value) or value <= 0:
-        return 1.0
-    exponent = 10.0 ** np.floor(np.log10(value))
-    fraction = value / exponent
-    for step in (1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0):
-        if fraction <= step + 1e-9:
-            return step * exponent
-    return 10.0 * exponent
+def normalize_amplitude(data, percentile=99.0):
+    """Scale a trace to unit amplitude using a robust 99th-percentile peak."""
+    finite = data[np.isfinite(data)]
+    if finite.size == 0:
+        return data, 1.0
+
+    magnitude = np.abs(finite)
+    scale = float(np.percentile(magnitude, percentile))
+    if not np.isfinite(scale) or scale <= 0:
+        scale = float(np.max(magnitude))
+    if not np.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    return data / scale, scale
 
 
 def make_waveform_png(window_sec=waveform, stations=None):
@@ -629,7 +632,7 @@ def make_waveform_png(window_sec=waveform, stations=None):
         color = STATION_COLORS[index % len(STATION_COLORS)]
         stream = streams[sid]
 
-        ax.set_ylabel("Amplitude\nm/s", fontsize=8.5, labelpad=2)
+        ax.set_ylabel("Normalized\namplitude", fontsize=8.5, labelpad=2)
         ax.tick_params(axis="y", labelsize=8.5, pad=2)
         ax.text(0.006, 0.92, sid, transform=ax.transAxes, va="top", ha="left",
                 fontsize=10, fontweight="bold", color=color,
@@ -651,14 +654,15 @@ def make_waveform_png(window_sec=waveform, stations=None):
                     ha="center", va="center", color="#8a96a3", fontsize=9)
             continue
 
-        peak = float(np.nanmax(np.abs(data))) if len(data) else 0.0
-        limit = nice_amplitude_limit(peak * 1.05) if np.isfinite(peak) and peak > 0 else 1e-6
+        normalized, scale = normalize_amplitude(data)
 
         x = np.arange(len(data)) / trace.stats.sampling_rate + (trace.stats.starttime - end)
-        ax.plot(x, data, color=color, linewidth=0.9)
-        ax.set_ylim(-limit, limit)
+        ax.plot(x, normalized, color=color, linewidth=0.9)
+        ax.set_ylim(-1.05, 1.05)
         ax.yaxis.set_major_locator(LinearLocator(5))
-        ax.yaxis.set_major_formatter(FuncFormatter(format_amplitude))
+        ax.text(0.994, 0.92, f"p99 {format_amplitude(scale, None)} m/s", transform=ax.transAxes,
+                va="top", ha="right", fontsize=8, color="#63707d",
+                bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "none", "alpha": 0.8})
 
         for detection in detections:
             if detection["station"] != sid:
@@ -674,7 +678,7 @@ def make_waveform_png(window_sec=waveform, stations=None):
         FuncFormatter(lambda value, _: (end + float(value)).strftime("%H:%M:%S"))
     )
     axes[-1].set_xlabel("Time (UTC)")
-    fig.suptitle(f"Live waveforms, last {window_sec:g} s (red line = station trigger)",
+    fig.suptitle(f"Live waveforms, last {window_sec:g} s — normalized (red line = station trigger)",
                  x=0.5, y=0.995, fontsize=10.5, fontweight="bold", color="#17212b")
     fig.subplots_adjust(left=0.135, right=0.995, top=0.95, bottom=0.075, hspace=0.28)
 
@@ -1034,7 +1038,7 @@ function stationLabel(name) {
 }
 
 function selectionNote(names) {
-  return `${names.length} station${names.length === 1 ? "" : "s"} selected`;
+  return `${names.length} station${names.length === 1 ? "" : "s"} selected · each trace normalized to its 99th-percentile amplitude`;
 }
 
 function refreshStationIcons() {
