@@ -12,7 +12,7 @@ from flask import Flask, Response, jsonify, request
 from matplotlib.ticker import FuncFormatter, LinearLocator
 from obspy import Stream, UTCDateTime
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
-from obspy.signal.trigger import classic_sta_lta, trigger_onset
+from obspy.signal.trigger import recursive_sta_lta, trigger_onset
 from scipy.signal import hilbert
 
 from earthquake import run_location
@@ -51,10 +51,10 @@ buffer = 300
 pre = 30             
 wait = 40            
 MIN_STATIONS = 3         
-coincidence = 30     
+coincidence = 60
 DETECT_EVERY = 2.0      
 DETECT_WINDOW = 90       
-DEDUP_SEC = 60            
+DEDUP_SEC = 5      
 RECONNECT_SEC = 10       
 ACTIVE_SEC = 60           
 waveform = 60      
@@ -183,7 +183,7 @@ def find_onset(sid, now):
     if trace.stats.npts < int((lta_p + 5) * fs):
         return None
 
-    cft = classic_sta_lta(trace.data, int(sta_p * fs), int(lta_p * fs))
+    cft = recursive_sta_lta(trace.data, int(sta_p * fs), int(lta_p * fs))
     onsets = trigger_onset(cft, thr_on, thr_off)
     if len(onsets) == 0:
         return None
