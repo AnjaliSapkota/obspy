@@ -264,6 +264,47 @@ def prepare_picks(
     return prepared
 
 
+def auto_max_sp_sec(
+    geometry,
+    vp,
+    vs,
+    margin_sec=10.0,
+    cap_sec=180.0,
+):
+    """
+    Physical upper bound for S-P pairing, derived from the network aperture.
+
+    At a station the S-P interval is ``distance * (1/vs - 1/vp)``. The
+    largest difference in S-P between two stations is therefore bounded by
+    their separation times that slowness, so the widest station-to-station
+    distance gives a sensible upper bound. A fixed value such as 60 s
+    silently drops distant events whose S-P is longer.
+    """
+
+    if vs <= 0 or vp <= vs:
+        raise ValueError("Velocities must satisfy vp > vs > 0.")
+
+    if margin_sec < 0:
+        raise ValueError("Margin cannot be negative.")
+
+    if cap_sec <= 0:
+        raise ValueError("Cap must be positive.")
+
+    aperture_km = max(
+        geometry.distances.values(),
+        default=0.0,
+    )
+
+    sp_slowness = (1.0 / vs) - (1.0 / vp)
+
+    return float(
+        min(
+            cap_sec,
+            aperture_km * sp_slowness + margin_sec,
+        )
+    )
+
+
 def pair_ps(
     picks,
     min_sp_sec=2.0,
@@ -274,6 +315,9 @@ def pair_ps(
 
     Each S pick is assigned to the most recent preceding P pick,
     provided that the S-P interval is within the allowed range.
+
+    ``max_sp_sec=None`` removes the upper bound (useful when the caller
+    already restricted the search window some other way).
 
     Only one S pick can be paired with each P pick.
 
@@ -291,7 +335,7 @@ def pair_ps(
             "Minimum S-P interval must be positive."
         )
 
-    if max_sp_sec <= min_sp_sec:
+    if max_sp_sec is not None and max_sp_sec <= min_sp_sec:
         raise ValueError(
             "Maximum S-P interval must exceed minimum S-P interval."
         )
@@ -359,7 +403,7 @@ def pair_ps(
                 if sp_time < min_sp_sec:
                     continue
 
-                if sp_time > max_sp_sec:
+                if max_sp_sec is not None and sp_time > max_sp_sec:
                     continue
 
                 pairs.append((p_pick, s_pick))

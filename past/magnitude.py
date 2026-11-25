@@ -1,7 +1,6 @@
 import numpy as np
 from obspy.geodetics import gps2dist_azimuth
 
-
 def validate_number(value, name):
     try:
         value = float(value)

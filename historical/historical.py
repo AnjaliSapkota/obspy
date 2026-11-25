@@ -1,23 +1,20 @@
 import base64
 import io
-import json
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from itertools import combinations
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from flask import Blueprint, Response, jsonify, request
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.signal.trigger import classic_sta_lta, trigger_onset
 from obspy.taup import TauPyModel
 from scipy.signal import hilbert
 
-from magnitude import calculate_ml
+from realtime.magnitude import calculate_ml
 from past.plotting import circle_map_png
 
 
@@ -32,9 +29,21 @@ COUNTS_PER_M = 1.0
 TRAVEL_DEPTHS = (10.0, 20.0, 30.0)
 TRAVEL_MAX_KM = 1400.0
 TRAVEL_STEP_KM = 10.0
-# S-P separations shorter than this are dominated by the P coda, so they are
-# not used as distance constraints.
-S_MIN_SEPARATION = 30.0
+
+# A trigger shorter than this is treated as a spike, not a phase arrival.
+MIN_TRIGGER_SEC = 0.5
+# A station joins an event only if its P pick is this close to the prediction.
+P_ASSOC_SEC = 5.0
+# Search half-width when re-picking P and S near the predicted arrival.
+P_PICK_WINDOW_SEC = 12.0
+S_PICK_WINDOW_SEC = 10.0
+# S onsets farther than this from the final S prediction are not trusted.
+S_ASSOC_SEC = 3.0
+# Candidate S onsets are collected over a wider window because the P-only
+# location still has an unconstrained depth (and therefore S-P error).
+S_CANDIDATE_WINDOW_SEC = S_PICK_WINDOW_SEC + 5.0
+# A located event whose P picks still scatter more than this is not trusted.
+MAX_P_RMS_SEC = 4.0
 
 DEFAULT_SETTINGS = {
     "fs": 50.0,
@@ -145,20 +154,26 @@ def detect_station_range(station, start, end, settings, cancel=None):
     failed_chunks = 0
     last_error = None
 
+    # Keep enough data before each chunk so the LTA (and therefore the CFT)
+    # is already warm when the chunk starts.  Without this the filter and
+    # STA/LTA start cold at every chunk boundary and can fire spuriously.
+    pad = max(DETECT_PAD, lta + sta + 2.0)
+
     position = start
     while position < end:
         if cancel is not None and cancel():
             break
 
         chunk_end = min(position + CHUNK_SEC, end)
+        wave_start = position - pad
         try:
             stream = client.get_waveforms(
                 station["net"],
                 station["sta"],
                 "*",
                 "?H?",
-                position - DETECT_PAD,
-                chunk_end + DETECT_PAD,
+                wave_start,
+                chunk_end + pad,
             )
             if len(stream) == 0:
                 raise ValueError("No data")
@@ -168,7 +183,7 @@ def detect_station_range(station, start, end, settings, cancel=None):
             if z is None:
                 raise ValueError("No vertical component")
 
-            z.trim(position, chunk_end, pad=True, fill_value=0)
+            z.trim(wave_start, chunk_end, pad=True, fill_value=0)
             if z.stats.npts < int((lta + sta + 3) * fs):
                 raise ValueError("Not enough samples in chunk")
 
@@ -179,12 +194,15 @@ def detect_station_range(station, start, end, settings, cancel=None):
                 trigger_time = z.stats.starttime + onset / fs
                 if trigger_time < position or trigger_time >= chunk_end:
                     continue
+                duration = (offset - onset) / fs
+                if duration < MIN_TRIGGER_SEC:
+                    continue
                 triggers.append({
                     "station": station_id(station),
                     "t": float(trigger_time.timestamp),
                     "time": fmt_time(trigger_time),
                     "cft": round(float(cft[onset]), 2),
-                    "duration": round(float((offset - onset) / fs), 2),
+                    "duration": round(float(duration), 2),
                 })
             ok_chunks += 1
         except Exception as error:
@@ -350,14 +368,16 @@ def overview_png(streams, result, start, end):
         if info.get("p_time"):
             ax.axvline(float(UTCDateTime(info["p_time"]) - start),
                        color="#D6361F", linestyle="--", linewidth=1)
-        if info.get("s_time"):
-            ax.axvline(float(UTCDateTime(info["s_time"]) - start),
-                       color="#1F7A55", linestyle="--", linewidth=1)
+            if info.get("s_time"):
+                ax.axvline(float(UTCDateTime(info["s_time"]) - start),
+                           color="#1F7A55",
+                           linestyle="-" if info.get("s_picked") else ":",
+                           linewidth=1)
 
     axes[-1].set_xlabel("Seconds from event window start")
     fig.suptitle(
-        "Event waveforms, each trace normalized (red = P arrival, green = predicted S)\n"
-        "Quiet lead-ins are low background noise, not data gaps",
+        "Event waveforms, each trace normalized (red = P pick, green = S pick)\n"
+        "Dotted green is a predicted S where no S onset was picked",
         fontsize=10, fontweight="bold",
     )
     fig.tight_layout()
@@ -494,33 +514,18 @@ def predict_times(location, station):
     return km, p_time, s_time
 
 
-def choose_location(stations, p_times, s_times):
-    """Locate with P times, then add S-P times that survive an outlier check."""
-    p_only = locate_event(stations, p_times, {})
-    used = {
-        name: UTCDateTime(value).timestamp for name, value in s_times.items()
-    }
-    if len(used) < 2:
-        return p_only, {}
+def distance_from_sp(sp_seconds, depth):
+    """Epicentral distance whose predicted S-P time matches ``sp_seconds``.
 
-    location = locate_event(stations, p_times, used)
-    for _ in range(2):
-        station_by_name = {station_id(s): s for s in stations}
-        residuals = {}
-        for name in used:
-            _km, _p, predicted_s = predict_times(location, station_by_name[name])
-            residuals[name] = used[name] - predicted_s
-        worst = max(residuals, key=lambda name: abs(residuals[name]))
-
-        if len(used) > 2 and abs(residuals[worst]) > 6.0:
-            del used[worst]
-            location = locate_event(stations, p_times, used)
-        elif abs(residuals[worst]) > 10.0:
-            return p_only, {}
-        else:
-            break
-
-    return location, used
+    This is independent of the trial epicenter, so circles drawn with it make
+    a genuine consistency check of the located epicenter.
+    """
+    distances, p_curve, s_curve = travel_curves(depth)
+    sp_curve = s_curve - p_curve
+    order = np.argsort(sp_curve)
+    return float(np.interp(
+        float(sp_seconds), sp_curve[order], distances[order],
+    ))
 
 
 def failed_event(group, start, end, error, index):
@@ -544,32 +549,345 @@ def failed_event(group, start, end, error, index):
     }
 
 
-def s_candidates(p_times, triggers, settings):
-    """First later trigger per station, far enough after P to be an S phase."""
-    by_station = {}
-    for item in triggers or []:
-        by_station.setdefault(item["station"], []).append(item["t"])
+def sta_lta_cft(data, fs, sta, lta):
+    """STA/LTA characteristic function, or None when the window is too short."""
+    values = np.asarray(data, dtype=float)
+    nsta = max(1, int(round(sta * fs)))
+    nlta = max(nsta + 1, int(round(lta * fs)))
+    if len(values) <= nlta + 1:
+        return None
+    cft = classic_sta_lta(values, nsta, nlta)
+    return np.nan_to_num(cft, nan=0.0, posinf=0.0, neginf=0.0)
 
-    lower = max(float(settings["min_sp_sec"]), S_MIN_SEPARATION)
-    upper = float(settings["max_sp_sec"])
-    candidates = {}
-    for name, p_time in p_times.items():
-        for value in sorted(by_station.get(name, [])):
-            separation = value - p_time
-            if separation < lower:
+
+def aic_pick(data, fs, index, search_before=1.5, search_after=0.75, max_shift=1.0):
+    """Refine an STA/LTA onset sample with the Akaike information criterion."""
+    values = np.asarray(data, dtype=float)
+    count = len(values)
+    index = int(index)
+    if count < 12 or not np.isfinite(fs) or fs <= 0:
+        return index
+
+    start = max(1, index - int(round(search_before * fs)))
+    stop = min(count - 2, index + int(round(search_after * fs)))
+    if stop - start < 12:
+        return index
+
+    segment = values[start:stop + 1]
+    segment = segment - np.mean(segment)
+    length = len(segment)
+
+    cumulative = np.cumsum(segment)
+    cumulative_sq = np.cumsum(segment * segment)
+
+    k = np.arange(1, length - 1)
+    sum_left = cumulative[k - 1]
+    sum_right = cumulative[-1] - sum_left
+    sq_left = cumulative_sq[k - 1]
+    sq_right = cumulative_sq[-1] - sq_left
+
+    var_left = sq_left / k - (sum_left / k) ** 2
+    right_length = length - k
+    var_right = sq_right / right_length - (sum_right / right_length) ** 2
+
+    valid = (var_left > 0) & (var_right > 0)
+    if not np.any(valid):
+        return index
+
+    aic = np.full(k.shape, np.inf, dtype=float)
+    aic[valid] = (
+        k[valid] * np.log(var_left[valid])
+        + right_length[valid] * np.log(var_right[valid])
+    )
+
+    best = int(np.argmin(aic))
+    pick = start + int(k[best])
+    edge = max(2, int(0.05 * length))
+    if best < edge or best >= len(k) - edge:
+        return index
+    if abs(pick - index) > max_shift * fs:
+        return index
+    return pick
+
+
+def pick_phase(data, starttime, target, fs, settings, phase, search):
+    """Pick the onset nearest a predicted arrival and refine it with AIC."""
+    phase = phase.upper()
+    if phase == "P":
+        sta = float(settings["sta_p"])
+        lta = float(settings["lta_p"])
+        thr_on = float(settings["thr_on"])
+        thr_off = float(settings["thr_off"])
+        before, after, max_shift = 1.5, 0.75, 1.0
+    else:
+        sta = float(settings["sta_s"])
+        lta = float(settings["lta_s"])
+        thr_on = float(settings["thr_on_s"])
+        thr_off = float(settings["thr_off_s"])
+        before, after, max_shift = 1.5, 3.0, 1.5
+
+    cft = sta_lta_cft(data, fs, sta, lta)
+    if cft is None:
+        return None
+
+    target_ts = float(target)
+    best = None
+    for onset, offset in trigger_onset(cft, thr_on, thr_off):
+        onset_time = starttime + onset / fs
+        delta = abs(float(onset_time.timestamp) - target_ts)
+        if delta > search:
+            continue
+        if (offset - onset) / fs < MIN_TRIGGER_SEC:
+            continue
+        if best is None or delta < best[0]:
+            best = (delta, int(onset))
+
+    if best is None:
+        return None
+
+    index = aic_pick(
+        data, fs, best[1],
+        search_before=before, search_after=after, max_shift=max_shift,
+    )
+    return starttime + index / fs
+
+
+def robust_locate(stations, p_times, tolerance=P_ASSOC_SEC):
+    """Locate from the most mutually consistent subset of P picks.
+
+    Every subset of stations is located and scored by how many of the
+    remaining P picks it predicts within ``tolerance`` seconds.  A single
+    false trigger (for example an early noise burst on one station) then
+    cannot drag the epicenter away from the picks that agree.
+    """
+    station_by_name = {station_id(station): station for station in stations}
+    active = {
+        name: float(value) for name, value in p_times.items()
+        if name in station_by_name
+    }
+    names = sorted(active)
+    if len(names) < 3:
+        return None, {}, {}
+
+    best = None
+    for size in range(len(names), 2, -1):
+        for combo in combinations(names, size):
+            subset = [station_by_name[name] for name in combo]
+            picks = {name: active[name] for name in combo}
+            location = locate_event(subset, picks, {})
+            residuals = {
+                name: active[name] - predict_times(location, station_by_name[name])[1]
+                for name in names
+            }
+            inliers = {
+                name: active[name] for name in names
+                if abs(residuals[name]) <= tolerance
+            }
+            if len(inliers) < size:
                 continue
-            if separation <= upper:
-                candidates[name] = value
+            rms = float(np.sqrt(np.mean(
+                [residuals[name] ** 2 for name in inliers]
+            )))
+            score = (len(inliers), -rms)
+            if best is None or score > best[0]:
+                best = (score, location, inliers, residuals)
+        if best is not None and best[0][0] >= 4:
+            # Four or more agreeing stations make the solution redundant
+            # enough that smaller subsets do not need to be tried.
             break
-    return candidates
+
+    if best is None:
+        return None, {}, {}
+
+    _score, location, inliers, residuals = best
+    inlier_residuals = {
+        name: residuals[name] for name in inliers
+    }
+    return location, inliers, inlier_residuals
+
+
+def refine_p_picks(stations, location, streams, settings, search):
+    """Re-pick P on every station near the arrival predicted by ``location``."""
+    fs = float(settings["fs"])
+    refined = {}
+    for station in stations:
+        sid = station_id(station)
+        stream = streams.get(sid)
+        if stream is None:
+            continue
+        z = vertical_trace(stream)
+        if z is None or z.stats.npts < 10:
+            continue
+        _km, predicted_p, _s = predict_times(location, station)
+        picked = pick_phase(
+            z.data.astype(float), z.stats.starttime, predicted_p,
+            fs, settings, "P", search,
+        )
+        if picked is not None:
+            refined[sid] = float(picked.timestamp)
+    return refined
+
+
+def s_onsets(envelope, starttime, p_time, predicted_s, fs, settings):
+    """All STA/LTA onsets that could be an S arrival for one station.
+
+    Returns ``(timestamp, sample_index)`` pairs, limited to triggers between
+    the minimum and maximum plausible S-P time and near the S prediction.
+    """
+    cft = sta_lta_cft(
+        envelope, fs, float(settings["sta_s"]), float(settings["lta_s"]),
+    )
+    if cft is None:
+        return []
+
+    lower = float(settings["min_sp_sec"])
+    upper = float(settings["max_sp_sec"])
+    onsets = []
+    for onset, offset in trigger_onset(
+        cft, float(settings["thr_on_s"]), float(settings["thr_off_s"]),
+    ):
+        if (offset - onset) / fs < MIN_TRIGGER_SEC:
+            continue
+        timestamp = float((starttime + onset / fs).timestamp)
+        if not lower <= timestamp - p_time <= upper:
+            continue
+        if abs(timestamp - predicted_s) > S_CANDIDATE_WINDOW_SEC:
+            continue
+        onsets.append((timestamp, int(onset)))
+    return onsets
+
+
+def pick_s_picks(stations, p_times, components, settings, location=None):
+    """Pick S arrivals and refine the location with the consistent S-P times.
+
+    S is often emergent and the P-only location still has an unconstrained
+    depth, so the single onset nearest one prediction can easily land on the P
+    coda.  This alternates between choosing the onset nearest the current
+    prediction and relocating with P + S-P times, then keeps only the S picks
+    that stay within ``S_ASSOC_SEC`` of the converged prediction.
+
+    Returns ``(s_picks, location, used_s)``.
+    """
+    fs = float(settings["fs"])
+    station_by_name = {station_id(station): station for station in stations}
+    active = [s for s in stations if station_id(s) in p_times]
+    if location is None:
+        location = locate_event(active, p_times, {})
+    if location is None or len(active) < 3:
+        return {}, location, set()
+
+    candidates = {}
+    for station in active:
+        sid = station_id(station)
+        if components.get(sid) is None:
+            continue
+        z, envelope, _max_hor = components[sid]
+        _km, _predicted_p, predicted_s = predict_times(location, station)
+        onsets = s_onsets(
+            envelope, z.stats.starttime, p_times[sid], predicted_s, fs, settings,
+        )
+        if onsets:
+            candidates[sid] = onsets
+
+    if len(candidates) < 2:
+        return {}, location, set()
+
+    def nearest(loc):
+        chosen = {}
+        for sid, onsets in candidates.items():
+            _km, _p, predicted_s = predict_times(loc, station_by_name[sid])
+            chosen[sid] = min(onsets, key=lambda item: abs(item[0] - predicted_s))
+        return chosen
+
+    def fit(seed):
+        chosen = dict(seed)
+        best = None
+        for _ in range(4):
+            s_times = {sid: item[0] for sid, item in chosen.items()}
+            trial = locate_event(active, p_times, s_times)
+            residuals = {
+                sid: s_times[sid] - predict_times(trial, station_by_name[sid])[2]
+                for sid in s_times
+            }
+            p_residuals = [
+                p_times[sid] - predict_times(trial, station)[1]
+                for sid, station in station_by_name.items()
+                if sid in p_times
+            ]
+            rms = float(np.sqrt(np.mean([value ** 2 for value in residuals.values()])))
+            p_rms = float(np.sqrt(np.mean(np.square(p_residuals))))
+            inlier_count = sum(1 for value in residuals.values() if abs(value) <= S_ASSOC_SEC)
+            score = (inlier_count, -(rms + p_rms))
+            if best is None or score > best[0]:
+                best = (score, trial, dict(chosen), residuals)
+            if inlier_count < 2:
+                break
+            following = nearest(trial)
+            if {sid: item[0] for sid, item in following.items()} == s_times:
+                break
+            chosen = following
+        return best
+
+    # The nearest trigger can be P coda when two onsets are nearly equidistant
+    # from an uncertain prediction, so also start from each alternative trigger
+    # and keep the solution that explains the most arrivals with the least
+    # scatter.
+    seeds = [nearest(location)]
+    for sid, onsets in candidates.items():
+        if len(onsets) < 2:
+            continue
+        for candidate in onsets:
+            seed = nearest(location)
+            seed[sid] = candidate
+            seeds.append(seed)
+
+    best = None
+    for seed in seeds:
+        result = fit(seed)
+        if result is not None and (best is None or result[0] > best[0]):
+            best = result
+
+    if best is None:
+        return {}, location, set()
+
+    _score, trial, chosen, residuals = best
+    inliers = {
+        sid: item for sid, item in chosen.items()
+        if abs(residuals[sid]) <= S_ASSOC_SEC
+    }
+    if len(inliers) < 2:
+        return {}, location, set()
+
+    # AIC-refine the accepted triggers and relocate once with the sharpened
+    # onsets; onsets that no longer fit are dropped.
+    refined = {}
+    for sid, (_timestamp, index) in inliers.items():
+        z, envelope, _max_hor = components[sid]
+        pick = aic_pick(envelope, fs, index, 1.5, 3.0, 1.5)
+        refined[sid] = float((z.stats.starttime + pick / fs).timestamp)
+
+    located = locate_event(active, p_times, refined)
+    refined_residuals = {
+        sid: refined[sid] - predict_times(located, station_by_name[sid])[2]
+        for sid in refined
+    }
+    used = {
+        sid: value for sid, value in refined.items()
+        if abs(refined_residuals[sid]) <= S_ASSOC_SEC
+    }
+    if len(used) < 2:
+        return {}, location, set()
+    return used, located, set(used)
+
 
 
 def locate_candidate(stations, group, settings, index, triggers=None):
-    p_times = {item["station"]: item["t"] for item in group}
-    names = set(p_times)
+    del triggers  # S is picked from the waveforms, not from detection triggers.
+    raw_p_times = {item["station"]: float(item["t"]) for item in group}
+    names = set(raw_p_times)
     selected = [station for station in stations if station_id(station) in names]
-    first = min(p_times.values())
-    last = max(p_times.values())
+    first = min(raw_p_times.values())
+    last = max(raw_p_times.values())
     start = UTCDateTime(first - float(settings["pre"]))
     tail = float(settings["max_sp_sec"]) + float(settings["post"])
     end = UTCDateTime(min(time.time(), last + tail))
@@ -586,93 +904,171 @@ def locate_candidate(stations, group, settings, index, triggers=None):
 
         usable = [s for s in selected if station_id(s) in streams]
         fs = float(settings["fs"])
-        s_times = {
-            name: value for name, value in s_candidates(
-                p_times, triggers, settings
-            ).items()
-            if name in {station_id(s) for s in usable}
-        }
 
-        location, used_s = choose_location(usable, p_times, s_times)
-        residuals = {}
-        for station in usable:
-            sid = station_id(station)
-            _km, predicted, _s = predict_times(location, station)
-            residuals[sid] = p_times[sid] - predicted
+        # Locate from the detection triggers first, dropping gross outliers,
+        # then re-pick every P on the waveform near the predicted arrival.
+        location, p_times, _residuals = robust_locate(usable, raw_p_times)
+        if location is None or len(p_times) < 3:
+            return failed_event(
+                group, start, end,
+                "Fewer than 3 consistent P picks", index,
+            )
 
-        results = []
-        station_magnitudes = []
+        for search in (P_PICK_WINDOW_SEC, 6.0):
+            refined = refine_p_picks(usable, location, streams, settings, search)
+            if len(refined) < 3:
+                break
+            p_times = refined
+            location, p_times, _residuals = robust_locate(usable, p_times)
+            if location is None or len(p_times) < 3:
+                return failed_event(
+                    group, start, end,
+                    "Fewer than 3 consistent P picks", index,
+                )
+
+        p_rms_sec = float(np.sqrt(np.mean(
+            [value ** 2 for value in _residuals.values()]
+        )))
+        if p_rms_sec > MAX_P_RMS_SEC:
+            return failed_event(
+                group, start, end,
+                f"P picks are inconsistent (RMS {p_rms_sec:.1f} s)", index,
+            )
+
         fetch = make_fetch(streams)
-
+        components = {}
         for station in usable:
             sid = station_id(station)
-            distance, predicted_p, predicted_s = predict_times(location, station)
-            s_time = UTCDateTime(predicted_s)
-            sp_diff = predicted_s - predicted_p
-
             try:
-                z, env, max_hor = fetch(
+                components[sid] = fetch(
                     None, station, start, end, fs,
                     float(settings["fmin"]), float(settings["fmax"]), 0.0,
                 )
-                s_index = int((s_time - z.stats.starttime) * fs)
-                window = max_hor[max(0, s_index):max(0, s_index) + int(2 * fs)]
-                ml = None
-                if len(window) > 0:
-                    amplitude = float(np.max(window)) * 1e9
-                    ml = calculate_ml(amplitude, 0.2, distance, 0.0)
             except Exception:
-                ml = None
+                components[sid] = None
+
+        consistent = [s for s in usable if station_id(s) in p_times]
+        s_picks, location, used_s = pick_s_picks(
+            consistent, p_times, components, settings, location,
+        )
+
+        residuals = {}
+        for station in usable:
+            sid = station_id(station)
+            if sid in p_times:
+                _km, predicted_p, _predicted_s = predict_times(location, station)
+                residuals[sid] = p_times[sid] - predicted_p
+
+        results = []
+        station_magnitudes = []
+        vp = float(settings["vp"])
+        for station in usable:
+            sid = station_id(station)
+            distance, predicted_p, predicted_s = predict_times(location, station)
+            s_pred_time = UTCDateTime(predicted_s)
+            s_value = s_picks.get(sid, predicted_s)
+            s_time = UTCDateTime(s_value)
+            if sid in p_times:
+                sp_diff = s_value - p_times[sid]
+            else:
+                sp_diff = predicted_s - predicted_p
+
+            ml = None
+            if components.get(sid) is not None:
+                try:
+                    z, _env, max_hor = components[sid]
+                    s_index = int((s_time - z.stats.starttime) * fs)
+                    window = max_hor[max(0, s_index):max(0, s_index) + int(2 * fs)]
+                    if len(window) > 0:
+                        amplitude = float(np.max(window)) * 1e9
+                        ml = calculate_ml(amplitude, 0.2, distance, 0.0)
+                except Exception:
+                    ml = None
 
             if ml is not None:
                 station_magnitudes.append(ml)
 
-            residual_km = residuals[sid] * float(settings["vp"])
-            if abs(residuals[sid]) <= 2.0:
-                quality = "GOOD"
-            elif abs(residuals[sid]) <= 5.0:
-                quality = "FAIR"
+            if sid in residuals:
+                residual_km = residuals[sid] * vp
+                if abs(residuals[sid]) <= 2.0:
+                    quality = "GOOD"
+                elif abs(residuals[sid]) <= 5.0:
+                    quality = "FAIR"
+                else:
+                    quality = "REJECT"
             else:
+                residual_km = None
                 quality = "REJECT"
 
             results.append({
                 "name": sid,
                 "quality": quality,
-                "error": None,
-                "p_time": UTCDateTime(p_times[sid]).isoformat(),
+                "error": None if sid in p_times else "No consistent P pick",
+                "p_time": (
+                    UTCDateTime(p_times[sid]).isoformat() if sid in p_times else None
+                ),
+                "trigger_time": (
+                    fmt_time(raw_p_times[sid]) if sid in raw_p_times else None
+                ),
                 "s_time": s_time.isoformat(),
+                "s_pred_time": s_pred_time.isoformat(),
+                "s_picked": sid in s_picks,
                 "sp_diff": sp_diff,
                 "hypo_distance_km": distance,
                 "ml": round(ml, 2) if ml is not None else None,
                 "residual_km": residual_km,
             })
 
-        vp = float(settings["vp"])
-        rms_km = float(np.sqrt(np.mean(
-            [(residuals[station_id(s)] * vp) ** 2 for s in usable]
-        )))
+        rms_km = float(np.sqrt(np.mean([
+            (residuals[station_id(s)] * vp) ** 2 for s in consistent
+        ])))
         magnitude = (
             float(np.median(station_magnitudes)) if station_magnitudes else None
         )
-        obs = [
-            (s["lat"], s["lon"],
-             predict_times(location, s)[0])
-            for s in usable
-        ]
         method = "P and S-P" if used_s else "P"
-        map_png = circle_map_png(
-            obs,
-            [station_id(s) for s in usable],
-            (location["lat"], location["lon"]),
-            title=f"Location from {method} arrival times",
-        )
+        depth = float(location["depth"])
+        sp_obs = []
+        sp_names = []
+        sp_labels = []
+        for station in consistent:
+            sid = station_id(station)
+            if sid not in used_s:
+                continue
+            sp = float(s_picks[sid] - p_times[sid])
+            km = distance_from_sp(sp, depth)
+            sp_obs.append((station["lat"], station["lon"], km))
+            sp_names.append(sid)
+            sp_labels.append(f"{sid} S-P {sp:.1f}s ({km:.1f} km)")
+
+        if len(sp_obs) >= 2:
+            map_png = circle_map_png(
+                sp_obs,
+                sp_names,
+                (location["lat"], location["lon"]),
+                title=(
+                    "Epicentral distance from observed S-P times "
+                    f"(depth {depth:.0f} km)"
+                ),
+                legend_labels=sp_labels,
+            )
+        else:
+            obs = [
+                (s["lat"], s["lon"], predict_times(location, s)[0])
+                for s in consistent
+            ]
+            map_png = circle_map_png(
+                obs,
+                [station_id(s) for s in consistent],
+                (location["lat"], location["lon"]),
+                title=f"Station distances from the {method} solution",
+            )
 
         event = {
             "id": f"e{index}",
             "located": True,
             "error": None,
             "origin_time": UTCDateTime(location["origin"]).isoformat(),
-            "time": fmt_time(first),
+            "time": fmt_time(min(p_times.values())),
             "lat": location["lat"],
             "lon": location["lon"],
             "magnitude": magnitude,
@@ -680,7 +1076,7 @@ def locate_candidate(stations, group, settings, index, triggers=None):
             "depth_km": round(location["depth"], 1),
             "location_method": method,
             "s_stations": sorted(used_s),
-            "n_stations": len(usable),
+            "n_stations": len(consistent),
             "window_start": str(start),
             "window_end": str(end),
             "trigger_stations": [item["station"] for item in group],
@@ -893,471 +1289,3 @@ def trim_jobs():
         for job_id, _ in finished[:len(JOBS) - 5]:
             JOBS.pop(job_id, None)
 
-
-def page_html(stations, settings):
-    station_payload = [
-        {
-            "name": station_id(station),
-            "sta": station["sta"],
-            "net": station["net"],
-            "lat": station.get("lat"),
-            "lon": station.get("lon"),
-        }
-        for station in stations
-    ]
-    return (
-        PAGE
-        .replace("__STATIONS__", json.dumps(station_payload))
-        .replace("__DEFAULTS__", json.dumps(settings))
-    )
-
-
-PAGE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Historical Earthquake Detection</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<style>
-  :root { --bg:#f1f4f7; --panel:#fff; --ink:#17212b; --muted:#63707d; --line:#dbe2e8;
-          --ok:#1f7a55; --bad:#d6361f; --blue:#2563eb; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, sans-serif;
-         font-variant-numeric:tabular-nums; }
-  header { background:var(--panel); border-bottom:1px solid var(--line); padding:14px 20px;
-           display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-  h1 { margin:0; font-size:19px; }
-  h2 { margin:0 0 10px; font-size:15px; }
-  a { color:var(--blue); text-decoration:none; }
-  .navbtn { display:inline-block; border:1px solid var(--line); border-radius:5px;
-            background:var(--panel); color:var(--ink); padding:6px 11px; font-weight:600; }
-  .navbtn:hover { background:#f4f6f8; }
-  main { max-width:1180px; margin:0 auto; padding:18px; display:grid;
-         grid-template-columns:340px minmax(0,1fr); gap:16px; align-items:start; }
-  @media (max-width:900px) { main { grid-template-columns:1fr; } }
-  .panel, section { background:var(--panel); border:1px solid var(--line); border-radius:7px;
-                    padding:14px 16px; }
-  #results > * + * { margin-top:16px; }
-  .muted { color:var(--muted); font-size:12.5px; }
-  label { display:block; font-size:12.5px; color:var(--muted); margin-top:10px; }
-  input[type=datetime-local], input[type=number], select {
-    width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:5px;
-    font:inherit; color:var(--ink); background:#fff; margin-top:3px;
-  }
-  fieldset { border:1px solid var(--line); border-radius:6px; margin:12px 0 0; padding:8px 10px; }
-  legend { color:var(--muted); font-size:12.5px; padding:0 4px; }
-  .stations { display:grid; grid-template-columns:1fr 1fr; gap:3px 10px; }
-  .stations label { display:flex; align-items:center; gap:7px; margin:3px 0; color:var(--ink);
-                    font-size:13px; }
-  .stations input { width:auto; }
-  .quick { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
-  button { font:inherit; border:1px solid var(--line); background:var(--panel); color:var(--ink);
-           border-radius:5px; padding:6px 11px; cursor:pointer; }
-  button:hover { background:#f4f6f8; }
-  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:600;
-                   width:100%; margin-top:14px; padding:9px; }
-  button.primary:disabled { opacity:.55; cursor:wait; }
-  .progress { height:8px; background:#e6ebf0; border-radius:4px; margin-top:12px; overflow:hidden; }
-  #bar { height:100%; width:0; background:var(--blue); transition:width .25s ease; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }
-  .card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
-  .card span { display:block; color:var(--muted); font-size:12px; }
-  .card b { font-size:21px; }
-  #map { height:380px; border:1px solid var(--line); border-radius:6px; background:#e3e8ed; }
-  .event { border-top:1px solid var(--line); padding:10px 0; }
-  .event:first-child { border-top:0; }
-  .eventhead { display:flex; gap:9px; align-items:baseline; flex-wrap:wrap; }
-  .eventhead b { font-size:15px; }
-  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11.5px;
-           font-weight:600; background:#ddefe6; color:#17603f; }
-  .badge.bad { background:#fbeae6; color:#8a2412; }
-  .plot { display:block; width:100%; max-width:720px; margin-top:10px; border:1px solid var(--line);
-          border-radius:6px; }
-  table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:8px; }
-  th, td { text-align:left; padding:4px 6px 4px 0; border-bottom:1px solid #edf1f4;
-           white-space:nowrap; }
-  th { color:var(--muted); font-weight:500; }
-  details { margin-top:8px; }
-  summary { cursor:pointer; color:var(--muted); font-size:12.5px; }
-  .err { color:var(--bad); }
-</style>
-</head>
-<body>
-<header>
-  <div><h1>Historical Earthquake Detection</h1>
-  <a class="navbtn" href="/">Live monitor &rarr;</a>
-</header>
-<main>
-  <section class="panel">
-    <form id="run-form">
-      <label>Start (UTC) <input type="datetime-local" id="start" step="1"></label>
-      <label>End (UTC) <input type="datetime-local" id="end" step="1"></label>
-
-      <fieldset>
-        <legend>Stations</legend>
-        <div class="stations" id="station-list"></div>
-      </fieldset>
-      <details>
-        <summary>Advanced settings</summary>
-        <label>Sample rate (Hz) <input type="number" id="set-fs" step="1"></label>
-        <label>Band low (Hz) <input type="number" id="set-fmin" step="0.1"></label>
-        <label>Band high (Hz) <input type="number" id="set-fmax" step="0.1"></label>
-        <label>P STA (s) <input type="number" id="set-sta_p" step="0.1"></label>
-        <label>P LTA (s) <input type="number" id="set-lta_p" step="0.1"></label>
-        <label>Trigger on <input type="number" id="set-thr_on" step="0.1"></label>
-        <label>Trigger off <input type="number" id="set-thr_off" step="0.1"></label>
-        <label>Coincidence (s) <input type="number" id="set-coincidence" step="1"></label>
-        <label>Minimum stations <input type="number" id="set-min_stations" step="1"></label>
-        <label>S-P max (s) <input type="number" id="set-max_sp_sec" step="1"></label>
-        <label>Vp (km/s) <input type="number" id="set-vp" step="0.1"></label>
-        <label>Vs (km/s) <input type="number" id="set-vs" step="0.1"></label>
-      </details>
-      <button class="primary" id="runbtn" type="submit">Run detection</button>
-    </form>
-    <div class="muted" id="jobmsg" style="margin-top:10px">Ready.</div>
-    <div class="progress"><div id="bar"></div></div>
-    <button type="button" id="cancelbtn" style="margin-top:8px;display:none">Cancel</button>
-  </section>
-
-  <div id="results">
-    <section><div class="cards" id="cards"></div></section>
-    <section><h2>Map</h2><div id="map"></div></section>
-    <section><h2>Detected events</h2>
-      <div id="events"><div class="muted">No events yet.</div></div></section>
-    <section><h2>Station triggers</h2><div id="triggers"><div class="muted">No triggers yet.</div></div></section>
-  </div>
-</main>
-
-<script>
-const STATIONS = __STATIONS__;
-const DEFAULTS = __DEFAULTS__;
-const $ = id => document.getElementById(id);
-const esc = value => String(value ?? "").replace(/[&<>"']/g, c => (
-  {"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]
-));
-const num = (value, digits = 2) => value == null ? "-" : Number(value).toFixed(digits);
-const shortTime = value => value ? String(value).replace("T", " ").slice(0, 19) + " UTC" : "-";
-
-function utcInput(date) {
-  return date.toISOString().slice(0, 19);
-}
-
-function setRange(hours) {
-  const end = new Date(Date.now() - 300000);
-  const start = new Date(end.getTime() - hours * 3600000);
-  $("end").value = utcInput(end);
-  $("start").value = utcInput(start);
-}
-
-$("station-list").innerHTML = STATIONS.map(station => `
-  <label><input type="checkbox" value="${esc(station.name)}" checked>
-    <span>${esc(station.sta)}</span><span class="muted">${esc(station.net)}</span></label>
-`).join("");
-
-Object.entries(DEFAULTS).forEach(([key, value]) => {
-  const input = $("set-" + key);
-  if (input) input.value = value;
-});
-
-let map = null;
-let eventLayer = null;
-
-function initMap() {
-  if (typeof L === "undefined") {
-    $("map").innerHTML = '<div class="muted" style="padding:24px">The map needs internet access to load Leaflet and the tiles.</div>';
-    return;
-  }
-  map = L.map("map").setView([28.2, 85.3], 7);
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors"
-  }).addTo(map);
-  eventLayer = L.layerGroup().addTo(map);
-
-  const points = [];
-  STATIONS.forEach(station => {
-    if (station.lat == null || station.lon == null) return;
-    points.push([station.lat, station.lon]);
-    L.circleMarker([station.lat, station.lon], {
-      radius: 6, color: "#1f7a55", fillColor: "#1f7a55", fillOpacity: 0.9
-    }).bindPopup(`<b>${esc(station.name)}</b>`).addTo(map);
-  });
-  if (points.length) map.fitBounds(points, { padding: [40, 40], maxZoom: 8 });
-}
-
-function updateMap(events) {
-  if (!map || !eventLayer) return;
-  eventLayer.clearLayers();
-  events.filter(event => event.located).forEach(event => {
-    L.circleMarker([event.lat, event.lon], {
-      radius: 9, color: "#8a2412", weight: 2, fillColor: "#d6361f", fillOpacity: 0.85
-    }).bindPopup(
-      `<b>M ${esc(event.magnitude ?? "?")}</b><br>` +
-      `${esc(shortTime(event.origin_time))}<br>` +
-      `${num(event.lat, 4)}, ${num(event.lon, 4)}<br>` +
-      `<span class="muted">RMS ${num(event.rms_km)} km</span>`
-    ).addTo(eventLayer);
-  });
-}
-
-function readSettings() {
-  const settings = {};
-  Object.keys(DEFAULTS).forEach(key => {
-    const input = $("set-" + key);
-    if (input) settings[key] = Number(input.value);
-  });
-  return settings;
-}
-
-function renderCards(data) {
-  const counts = data.counts;
-  $("cards").innerHTML = [
-    ["Stations with data", `${counts.stations_ok} / ${counts.stations}`],
-    ["Station triggers", counts.triggers],
-    ["Candidate events", counts.candidates],
-    ["Located events", counts.located],
-  ].map(([label, value]) => `<div class="card"><span>${esc(label)}</span><b>${esc(value)}</b></div>`).join("");
-}
-
-function eventCard(jobId, event) {
-  const head = event.located
-    ? `<b>M ${esc(event.magnitude ?? "?")}</b><span>${esc(shortTime(event.origin_time))}</span>
-       <span class="badge">LOCATED</span>`
-    : `<b>Detection</b><span>${esc(event.time || "-")}</span>
-       <span class="badge bad">NOT LOCATED</span>`;
-
-  const summary = event.located
-    ? `${num(event.lat, 3)}, ${num(event.lon, 3)} &middot; RMS ${num(event.rms_km)} km
-       &middot; ${esc(event.n_stations)} stations`
-    : `<span class="err">${esc(event.error || "No location could be computed")}</span>`;
-
-  const images = [];
-  if (event.has_map) {
-    images.push(`<img class="plot" loading="lazy" src="api/jobs/${jobId}/events/${event.id}/map.png" alt="Event map">`);
-  }
-  if (event.has_overview) {
-    images.push(`<img class="plot" loading="lazy" src="api/jobs/${jobId}/events/${event.id}/overview.png" alt="Event waveforms">`);
-  }
-
-  const rows = (event.stations || []).map(station => `
-    <tr><td>${esc(station.name)}</td><td>${esc(station.quality || "-")}</td>
-      <td>${esc((station.p_time || "-").slice(11, 23))}</td>
-      <td>${esc((station.s_time || "-").slice(11, 23))}</td>
-      <td>${esc(station.ml ?? "-")}</td>
-      <td>${num(station.residual_km, 1)}</td></tr>
-  `).join("");
-
-  const table = rows ? `
-    <table><thead><tr><th>Station</th><th>Quality</th><th>P</th><th>S (pred)</th><th>ML</th><th>Residual</th></tr></thead>
-    <tbody>${rows}</tbody></table>` : "";
-
-  return `<div class="event">
-    <div class="eventhead">${head}</div>
-    <div class="muted">${summary}</div>
-    <div class="muted">Triggered: ${esc((event.trigger_stations || []).join(", "))}</div>
-    <details><summary>Map, waveforms and station picks</summary>${images.join("")}${table}</details>
-  </div>`;
-}
-
-function renderTriggers(data) {
-  const triggers = data.triggers || [];
-  if (!triggers.length) {
-    $("triggers").innerHTML = '<div class="muted">No triggers yet.</div>';
-    return;
-  }
-  $("triggers").innerHTML = `
-    <div class="muted">Showing ${triggers.length} of ${data.trigger_count} triggers.</div>
-    <table><thead><tr><th>Time (UTC)</th><th>Station</th><th>CFT</th><th>Duration (s)</th></tr></thead>
-    <tbody>${triggers.map(trigger => `
-      <tr><td>${esc(trigger.time)}</td><td>${esc(trigger.station)}</td>
-        <td>${esc(trigger.cft)}</td><td>${esc(trigger.duration)}</td></tr>
-    `).join("")}</tbody></table>`;
-}
-
-function render(data) {
-  const running = data.status === "running";
-  $("runbtn").disabled = running;
-  $("cancelbtn").style.display = running ? "inline-block" : "none";
-  $("bar").style.width = `${data.progress || 0}%`;
-
-  let message = `${data.status} &middot; ${data.phase || ""} &middot; ${data.message || ""}`;
-  if (data.error) message = `<span class="err">${esc(data.error)}</span>`;
-  $("jobmsg").innerHTML = message;
-
-  renderCards(data);
-  $("events").innerHTML = data.events && data.events.length
-    ? data.events.map(event => eventCard(data.id, event)).join("")
-    : '<div class="muted">No events yet.</div>';
-  renderTriggers(data);
-  updateMap(data.events || []);
-}
-
-async function poll(jobId) {
-  try {
-    const response = await fetch(`api/jobs/${jobId}`, { cache: "no-store" });
-    if (!response.ok) {
-      if (response.status === 404) localStorage.removeItem("historical_job");
-      throw new Error("HTTP " + response.status);
-    }
-    const data = await response.json();
-    render(data);
-    if (data.status === "running") {
-      setTimeout(() => poll(jobId), 1500);
-    }
-  } catch (error) {
-    $("jobmsg").innerHTML = `<span class="err">Cannot read job: ${esc(error.message)}</span>`;
-  }
-}
-
-$("run-form").onsubmit = async event => {
-  event.preventDefault();
-  const stations = [...document.querySelectorAll("#station-list input:checked")]
-    .map(input => input.value);
-  if (stations.length < 3) {
-    $("jobmsg").textContent = "Select at least 3 stations.";
-    return;
-  }
-
-  $("runbtn").disabled = true;
-  $("jobmsg").textContent = "Starting job...";
-  try {
-    const response = await fetch("api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        start: $("start").value,
-        end: $("end").value,
-        stations: stations,
-        settings: readSettings(),
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Could not start job");
-    localStorage.setItem("historical_job", data.job_id);
-    poll(data.job_id);
-  } catch (error) {
-    $("runbtn").disabled = false;
-    $("jobmsg").innerHTML = `<span class="err">${esc(error.message)}</span>`;
-  }
-};
-
-$("cancelbtn").onclick = async () => {
-  const jobId = localStorage.getItem("historical_job");
-  if (!jobId) return;
-  await fetch(`api/jobs/${jobId}/cancel`, { method: "POST" });
-};
-
-document.querySelectorAll(".quick button").forEach(button => {
-  button.onclick = () => setRange(Number(button.dataset.hours));
-});
-
-initMap();
-setRange(6);
-
-const savedJob = localStorage.getItem("historical_job");
-if (savedJob) poll(savedJob);
-</script>
-</body>
-</html>
-"""
-
-
-def create_blueprint(stations, defaults=None):
-    station_list = [dict(station) for station in stations]
-    base_settings = dict(DEFAULT_SETTINGS)
-    if defaults:
-        for key in base_settings:
-            if key in defaults:
-                try:
-                    base_settings[key] = float(defaults[key])
-                except (TypeError, ValueError):
-                    pass
-    base_settings["min_stations"] = int(base_settings["min_stations"])
-
-    bp = Blueprint("historical", __name__, url_prefix="/historical")
-
-    @bp.route("/")
-    def historical_page():
-        return Response(page_html(station_list, base_settings), mimetype="text/html")
-
-    @bp.route("/api/run", methods=["POST"])
-    def api_run():
-        payload = request.get_json(silent=True) or {}
-        try:
-            params = build_params(payload, station_list, base_settings)
-        except ValueError as error:
-            return jsonify(error=str(error)), 400
-
-        with JOBS_LOCK:
-            active = [
-                job_id for job_id, job in JOBS.items()
-                if job.get("status") in ("running", "queued")
-            ]
-            if active:
-                return jsonify(
-                    error="A historical job is already running",
-                    job_id=active[0],
-                ), 409
-
-            job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-            JOBS[job_id] = {
-                "id": job_id,
-                "status": "queued",
-                "phase": "queued",
-                "progress": 0,
-                "message": "Queued",
-                "error": None,
-                "created": fmt_time(UTCDateTime()),
-                "created_ts": time.time(),
-                "finished": None,
-                "start": params["start"],
-                "end": params["end"],
-                "stations": params["stations"],
-                "settings": params["settings"],
-                "triggers": [],
-                "events": [],
-                "station_stats": [],
-                "candidate_count": 0,
-            }
-
-        trim_jobs()
-        threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
-        return jsonify(job_id=job_id)
-
-    @bp.route("/api/jobs/<job_id>")
-    def api_job(job_id):
-        job = JOBS.get(job_id)
-        if job is None:
-            return jsonify(error="Job not found"), 404
-        return jsonify(public_job(job))
-
-    @bp.route("/api/jobs/<job_id>/cancel", methods=["POST"])
-    def api_cancel(job_id):
-        job = JOBS.get(job_id)
-        if job is None:
-            return jsonify(error="Job not found"), 404
-        job["cancel"] = True
-        return jsonify(ok=True)
-
-    @bp.route("/api/jobs/<job_id>/events/<event_id>/<kind>.png")
-    def event_image(job_id, event_id, kind):
-        job = JOBS.get(job_id)
-        if job is None:
-            return Response("Job not found", status=404, mimetype="text/plain")
-        event = next(
-            (item for item in job.get("events", []) if item.get("id") == event_id),
-            None,
-        )
-        if event is None:
-            return Response("Event not found", status=404, mimetype="text/plain")
-
-        key = "map_png" if kind == "map" else "overview_png" if kind == "overview" else None
-        png = event.get(key) if key else None
-        if not png:
-            return Response("No image for this event", status=404, mimetype="text/plain")
-        return Response(base64.b64decode(png), mimetype="image/png",
-                        headers={"Cache-Control": "no-store"})
-
-    return bp

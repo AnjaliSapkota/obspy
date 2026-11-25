@@ -45,14 +45,33 @@ class Pick:
     accepted: bool = True
     rejection_reason: Optional[str] = None
 
+# @dataclass
+# class AssociationParams:
+#     min_sp_sec: float
+#     max_sp_sec: float
 
-@dataclass
-class Solution:
-    latitude: float
-    longitude: float
-    depth_km: float
-    origin_time: UTCDateTime
-    rms_sec: float
-    residuals: Dict[str, float] = field(default_factory=dict)
-    method: str = ""
-    depth_quality: str = ""
+#     vp: float
+#     vs: float
+
+#     moveout_vmin: float
+#     moveout_tolerance: float
+
+#     min_stations: int
+#     min_stations_tentative: int
+#     min_stations_confirmed: int
+
+#     max_rms_sec: float
+#     outlier_sec: float
+#     max_outlier_removals: int
+
+#     pick_expiry_sec: float
+
+#     travel_depths: tuple
+#     travel_max_km: float
+#     travel_step_km: float
+
+#     grid_spacing_coarse_km: float
+#     grid_spacing_fine_km: float
+#     grid_padding_km: float
+
+#     azimuthal_gap_max: float

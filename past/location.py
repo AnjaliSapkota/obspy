@@ -1,28 +1,15 @@
-
 from typing import List, Optional, Tuple
 import numpy as np
 from scipy.optimize import least_squares
 
-def latlon_to_xy(
-    lat: float,
-    lon: float,
-    lat0: float,
-    lon0: float,
-) -> Tuple[float, float]:
-
+def latlon_to_xy(lat: float, lon: float, lat0: float, lon0: float,) -> Tuple[float, float]:
     x = (lon - lon0) * 111.32 * np.cos(np.radians(lat0))
     y = (lat - lat0) * 110.574
 
     return x, y
 
 
-def xy_to_latlon(
-    x: float,
-    y: float,
-    lat0: float,
-    lon0: float,
-) -> Tuple[float, float]:
-
+def xy_to_latlon(x: float, y: float, lat0: float, lon0: float,) -> Tuple[float, float]:
     lat = lat0 + y / 110.574
     lon = lon0 + x / (111.32 * np.cos(np.radians(lat0)))
 

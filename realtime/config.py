@@ -7,13 +7,13 @@ WEB_HOST = "0.0.0.0"
 WEB_PORT = 8001
 
 STATIONS = [
-    {"net": "NP", "sta": "EQM10", "cha": "EHZ", "loc": "*", "lat": 28.299517, "lon": 83.960148,},
-    {"net": "NP", "sta": "EQM26", "cha": "EHZ", "loc": "*", "lat": 27.3936969, "lon": 86.6791885,},
-    {"net": "NP", "sta": "EQM07", "cha": "EHZ", "loc": "*", "lat": 27.814941, "lon": 86.713401,},
-    {"net": "NP", "sta": "EQM08", "cha": "EHZ", "loc": "*", "lat": 27.831000, "lon": 86.650000,},
-    {"net": "NP", "sta": "EQM11", "cha": "EHZ", "loc": "*", "lat": 29.2859556, "lon": 81.2741972,},
-    {"net": "NP", "sta": "EQM22", "cha": "EHZ", "loc": "*", "lat": 28.895805, "lon": 80.227341,},
-    {"net": "AM", "sta": "R0F23", "cha": "EHZ", "loc": "*", "lat": 28.045045, "lon": 84.072371,},
+    {"net": "NP", "sta": "EQM10", "cha": "EH*", "loc": "*", "lat": 28.299517, "lon": 83.960148,},
+    {"net": "NP", "sta": "EQM26", "cha": "EH*", "loc": "*", "lat": 27.3936969, "lon": 86.6791885,},
+    {"net": "NP", "sta": "EQM07", "cha": "EH*", "loc": "*", "lat": 27.814941, "lon": 86.713401,},
+    {"net": "NP", "sta": "EQM08", "cha": "EH*", "loc": "*", "lat": 27.831000, "lon": 86.650000,},
+    {"net": "NP", "sta": "EQM11", "cha": "EH*", "loc": "*", "lat": 29.2859556, "lon": 81.2741972,},
+    {"net": "NP", "sta": "EQM22", "cha": "EH*", "loc": "*", "lat": 28.895805, "lon": 80.227341,},
+    {"net": "AM", "sta": "R0F23", "cha": "EH*", "loc": "*", "lat": 28.045045, "lon": 84.072371,},
 ]
 
 DETECTION_SETTINGS = {
@@ -59,7 +59,11 @@ DETECTION_SETTINGS = {
     "aic_min_contrast": 50.0,
 
     "min_sp_sec": 2.0,
-    "max_sp_sec": 60.0,
+    # Upper bound for S-P pairing. 60 s is too small once a station is
+    # ~600 km from the event (S-P ~ 75 s). association.auto_max_sp_sec()
+    # derives this from the network aperture; this value is the fallback
+    # for callers that read the setting directly.
+    "max_sp_sec": 90.0,
 
     "vp": 6.0,
     "vs": 3.5,
@@ -105,3 +109,4 @@ HISTORICAL_SETTINGS = {
     "travel_max_km": 1400.0,
     "travel_step_km": 10.0,
 }
+

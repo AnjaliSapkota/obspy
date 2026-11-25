@@ -94,19 +94,108 @@ def spectrogram_png(name, z):
   return _fig_to_png_b64(fig)
 
 
-def circle_map_png(obs, names, epicenter, title="Trilateration from S-P travel times"):
+def _place_station_labels(ax, fig, obs, names, epicenter):
+  """Place station names where they do not cover markers, legend or each other."""
+  from matplotlib.transforms import Bbox
+
+  fig.canvas.draw()
+  renderer = fig.canvas.get_renderer()
+  axes_box = ax.get_window_extent(renderer=renderer)
+  obstacles = []
+  for lat, lon, _distance in obs:
+    x, y = ax.transData.transform((lon, lat))
+    obstacles.append(Bbox.from_bounds(x - 8, y - 8, 16, 16))
+  x, y = ax.transData.transform((epicenter[1], epicenter[0]))
+  obstacles.append(Bbox.from_bounds(x - 12, y - 12, 24, 24))
+  legend = ax.get_legend()
+  if legend is not None:
+    obstacles.append(legend.get_window_extent(renderer=renderer))
+
+  candidates = (
+      (9, 9, "left", "bottom"),
+      (9, -9, "left", "top"),
+      (-9, 9, "right", "bottom"),
+      (-9, -9, "right", "top"),
+      (11, 0, "left", "center"),
+      (-11, 0, "right", "center"),
+      (0, 12, "center", "bottom"),
+      (0, -12, "center", "top"),
+      (24, 16, "left", "bottom"),
+      (-24, 16, "right", "bottom"),
+      (24, -16, "left", "top"),
+      (-24, -16, "right", "top"),
+      (0, 24, "center", "bottom"),
+      (0, -24, "center", "top"),
+  )
+  style = dict(
+      textcoords="offset points", fontsize=8,
+      bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.85),
+  )
+
+  def outside(box):
+    return (
+        max(0.0, axes_box.x0 - box.x0) + max(0.0, box.x1 - axes_box.x1)
+        + max(0.0, axes_box.y0 - box.y0) + max(0.0, box.y1 - axes_box.y1)
+    )
+
+  for index in sorted(range(len(obs)), key=lambda i: -obs[i][0]):
+    lat, lon, _distance = obs[index]
+    best = None
+    best_score = None
+    for dx, dy, horizontal, vertical in candidates:
+      trial = ax.annotate(
+          names[index], (lon, lat), xytext=(dx, dy),
+          ha=horizontal, va=vertical, **style,
+      )
+      box = trial.get_window_extent(renderer=renderer)
+      padded = Bbox.from_extents(box.x0 - 2, box.y0 - 2, box.x1 + 2, box.y1 + 2)
+      score = (
+          sum(1 for item in obstacles if padded.overlaps(item)),
+          outside(padded),
+      )
+      if score == (0, 0):
+        if best is not None:
+          best.remove()
+        best = trial
+        best_score = score
+        break
+      if best_score is None or score < best_score:
+        if best is not None:
+          best.remove()
+        best = trial
+        best_score = score
+      else:
+        trial.remove()
+    if best is None:
+      best = ax.annotate(
+          names[index], (lon, lat), xytext=(9, 9),
+          ha="left", va="bottom", **style,
+      )
+    obstacles.append(best.get_window_extent(renderer=renderer))
+
+
+def circle_map_png(
+    obs, names, epicenter, title="Trilateration from S-P travel times",
+    legend_labels=None,
+):
   fig, ax = plt.subplots(figsize=(7, 7))
   ang = np.linspace(0, 2 * np.pi, 360)
 
-  for (lat, lon, d), nm in zip(obs, names):
+  for index, ((lat, lon, d), nm) in enumerate(zip(obs, names)):
     lat_circle = lat + (d / 110.574) * np.sin(ang)
     lon_circle = lon + (d / (111.32 * np.cos(np.radians(lat)))) * np.cos(ang)
 
-    ax.plot(lon_circle, lat_circle, lw=1.2, label=f"{nm} ({d:.1f} km)")
+    legend_label = (
+        legend_labels[index] if legend_labels is not None
+        else f"{nm} ({d:.1f} km)"
+    )
+    ax.plot(lon_circle, lat_circle, lw=1.2, label=legend_label)
     ax.plot(lon, lat, "^", color="k", ms=9)
-    ax.annotate(nm, (lon, lat), textcoords="offset points", xytext=(6, 6))
 
-  ax.plot(epicenter[1],epicenter[0],"r*",ms=18,label=f"Epicenter ({epicenter[0]:.3f}N, {epicenter[1]:.3f}E)",) 
+  ax.plot(
+      epicenter[1], epicenter[0], "r*", ms=18,
+      label=f"Epicenter ({epicenter[0]:.3f}N, {epicenter[1]:.3f}E)",
+  )
 
   ax.set_aspect(1 / np.cos(np.radians(epicenter[0])))
   ax.set_xlabel("Longitude (°E)")
@@ -114,6 +203,7 @@ def circle_map_png(obs, names, epicenter, title="Trilateration from S-P travel t
   ax.grid(True)
   ax.legend(loc="upper right", fontsize=8)
   ax.set_title(title)
-
   fig.tight_layout()
+
+  _place_station_labels(ax, fig, obs, names, epicenter)
   return _fig_to_png_b64(fig)
