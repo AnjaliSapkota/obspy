@@ -1,10 +1,3 @@
-"""Historical earthquake detection and location.
-
-This module is loaded by realtime_earthquake.py and mounted at /historical/.
-It scans archived FDSN data, groups station triggers, and locates events from
-their P arrival times.
-"""
-
 import base64
 import io
 import json
@@ -25,7 +18,7 @@ from obspy.taup import TauPyModel
 from scipy.signal import hilbert
 
 from magnitude import calculate_ml
-from plotting import circle_map_png
+from past.plotting import circle_map_png
 
 
 FDSN_URL = "https://seiscomp.alertnepal.online"

@@ -1,51 +1,47 @@
 
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-from pathlib import Path
 
+# FDSN server
 client = Client("https://seiscomp.alertnepal.online")
 
-network = "NK"
-station = "KKN"
+# Station information
+network = "NP"
+station = "EQM07"
 location = "*"
-channel = "BHZ"
+channel = "EH*"
 
-start_date = "2026-09-01"
-end_date = "2026-09-20" 
+# Time range (UTC)
+starttime = UTCDateTime("2026-11-24T01:00:00")
+endtime = UTCDateTime("2026-11-24T02:00:00")
 
-# Output folder
-output_dir = Path("data")
-output_dir.mkdir(parents=True, exist_ok=True)
-prefix = f"eq_{station.lower()}"
-start_date = UTCDateTime(start_date)
-end_date = UTCDateTime(end_date)
-current = start_date
+try:
+    print("Downloading waveform data...")
 
-while current < end_date:
+    st = client.get_waveforms(
+        network=network,
+        station=station,
+        location=location,
+        channel=channel,
+        starttime=starttime,
+        endtime=endtime
+    )
 
-    next_day = UTCDateTime(year=current.year,julday=current.julday) + 86400
+    if len(st) == 0:
+        print("No waveform data available.")
+    else:
+        # Save MiniSEED file
+        filename = "NP_EQM07_20261124_0100_0200.mseed"
 
-    request_end = min(next_day, end_date)
+        st.write(filename, format="MSEED")
 
-    filename = (f"{prefix}{current.year}"f"{current.month:02d}{current.day:02d}.mseed")
+        print("\nDownload successful!")
+        print("Saved:", filename)
+        print("Number of traces:", len(st))
+        print("Total samples:", sum(len(tr.data) for tr in st))
 
-    output_path = output_dir / filename
+        print("\nWaveform details:")
+        print(st)
 
-    print(f"File:      {filename}")
-    print(f"Station:   {station}")
-    print(f"Channel:   {channel}")
-
-    try:
-        st = client.get_waveforms(network=network, station=station, location=location, channel=channel, starttime=current, endtime=request_end,)
-
-        if len(st) == 0:
-            print("No data returned.")
-        else:
-            st.write(str(output_path), format="MSEED")
-
-    except Exception as exc:
-        print(f"Download failed: {exc}")
-
-    current = next_day
-
-print("\nDownload completed.")
+except Exception as e:
+    print("Download failed:", e)
