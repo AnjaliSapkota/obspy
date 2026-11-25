@@ -180,14 +180,6 @@ def prepare_picks(
     picks,
     dedup_sec=5.0,
 ) -> List[Pick]:
-    """
-    Prepare accepted P and S picks for event association.
-
-    Picks from the same station and phase are considered duplicates
-    when they occur within dedup_sec of the first pick in a cluster.
-
-    The best-quality pick is retained from each cluster.
-    """
 
     if dedup_sec < 0:
         raise ValueError(
@@ -271,15 +263,6 @@ def auto_max_sp_sec(
     margin_sec=10.0,
     cap_sec=180.0,
 ):
-    """
-    Physical upper bound for S-P pairing, derived from the network aperture.
-
-    At a station the S-P interval is ``distance * (1/vs - 1/vp)``. The
-    largest difference in S-P between two stations is therefore bounded by
-    their separation times that slowness, so the widest station-to-station
-    distance gives a sensible upper bound. A fixed value such as 60 s
-    silently drops distant events whose S-P is longer.
-    """
 
     if vs <= 0 or vp <= vs:
         raise ValueError("Velocities must satisfy vp > vs > 0.")

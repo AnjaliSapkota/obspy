@@ -17,11 +17,25 @@ def prepare_stream(stream, fs, fmin, fmax):
 
     if fmax >= fs / 2:
         raise ValueError("Maximum filter frequency must be below Nyquist frequency")
+    
 
     st = stream.copy()
 
+    # Check gaps and overlaps before merging.
+    gaps = st.get_gaps()
+
+    if gaps:
+        print(f"[preprocess] Found {len(gaps)} gaps/overlaps")
+
+        for gap in gaps:
+            print(
+                f"[preprocess] {gap[0]}.{gap[1]}.{gap[2]}.{gap[3]} "
+                f"{gap[4]} -> {gap[5]} "
+                f"gap={gap[6]} sec"
+            )
+
     # Merge waveform segments.
-    st.merge(method=1, fill_value=0,)
+    st.merge(method=1, fill_value=0)
 
     # Remove traces with fewer than 20 samples.
     for trace in list(st):

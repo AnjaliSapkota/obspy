@@ -37,8 +37,8 @@ print("Building travel-time table")
 t_table = TravelTimeTable(params.travel_depths, params.travel_max_km, params.travel_step_km)
 
 LOCK = threading.Lock()
-BUFFERS = {}  # "NET.STA" -> obspy Stream (all channels)
-plt_cache = {}  # tuple of station ids -> (time, png)
+BUFFERS = {}
+plt_cache = {}
 STATE = {
     "connected": False,
     "pending": False,
@@ -102,10 +102,7 @@ def station_traces(sid, window=None):
 
 
 def pick_phase(trace, sid, phase, after=None):
-    """STA/LTA trigger -> AIC pick -> SNR/AIC quality check.
-
-    Returns Pick objects (accepted or not) whose trigger is after `after`.
-    """
+    # STA/LTA trigger -> AIC pick -> SNR/AIC quality check.
     try:
         triggers = process_detection(trace.data, trace.stats.starttime, sid, phase)
     except ValueError:
@@ -163,7 +160,6 @@ def record_detection(sid, onset):
 
 
 def scan_for_event(now):
-    """P-pick every station; start a location if enough stations agree."""
     with LOCK:
         ignore = STATE["ignore_before"]
 
@@ -200,7 +196,7 @@ def scan_for_event(now):
     timer.daemon = True
     timer.start()
 
-
+# check for events every 2 seconds, but only if no other event is pending
 def detection_loop():
     while True:
         time.sleep(R["detect_every"])
@@ -1157,16 +1153,8 @@ def waveforms_png():
 
 
 def main():
-    print("Realtime earthquake detector")
-    print(f"  SeedLink : {SEEDLINK_SERVER}")
-    print(f"  Website  : http://127.0.0.1:{WEB_PORT}")
-
     threading.Thread(target=detection_loop, daemon=True).start()
-    threading.Thread(
-        target=lambda: app.run(host=WEB_HOST, port=WEB_PORT, debug=False,
-                               use_reloader=False, threaded=True),
-        daemon=True,
-    ).start()
+    threading.Thread(target=lambda: app.run(host=WEB_HOST, port=WEB_PORT, debug=False,use_reloader=False, threaded=True),daemon=True,).start()
 
     try:
         run_seedlink()

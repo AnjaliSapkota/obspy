@@ -1,9 +1,9 @@
 import numpy as np
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-from realtime.location import locate_epicenter_lsq
-from realtime.magnitude import calculate_epicentral_distance, calculate_ml
-from realtime.pickers import pick_p, pick_s
+from location import locate_epicenter_lsq
+from magnitude import calculate_epicentral_distance, calculate_ml
+from pickers import pick_p, pick_s
 from plotting import circle_map_png, spectrogram_png, waveform_stalta_png
 from quality import calculate_quality_metrics
 from waveforms import get_three_components

@@ -107,8 +107,6 @@ def process_detection(data, start_time, station_id, component):
     2. Find raw trigger intervals.
     3. Calculate trigger time, duration and amplitude.
     4. Return all Trigger objects.
-
-    No TriggerGate filtering is applied.
     """
 
     data = np.asarray(data, dtype=np.float64) # convert waveform data into numpy array of type float64
