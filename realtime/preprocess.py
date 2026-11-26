@@ -1,6 +1,78 @@
 import numpy as np
+from obspy import Stream
 
-def prepare_stream(stream, fs, fmin, fmax):
+
+def _merge_block(traces):
+    block = Stream()
+
+    for trace in traces:
+        block += trace
+
+    if len(block) > 1:
+        block.merge(method=1, fill_value="interpolate")
+
+    return block
+
+
+def merge_with_max_gap(stream, max_gap_sec=0.5):
+    if stream is None or len(stream) == 0:
+        return Stream()
+
+    max_gap_sec = float(max_gap_sec)
+
+    if max_gap_sec < 0:
+        raise ValueError("Maximum gap must not be negative")
+
+    segments = [
+        trace
+        for trace in stream.copy().split()
+        if trace.stats.npts > 0
+    ]
+
+    groups = {}
+
+    for trace in segments:
+        key = (
+            trace.stats.network,
+            trace.stats.station,
+            trace.stats.location,
+            trace.stats.channel,
+        )
+        groups.setdefault(key, []).append(trace)
+
+    merged = Stream()
+
+    for traces in groups.values():
+        traces.sort(key=lambda trace: (trace.stats.starttime, trace.stats.endtime))
+
+        block = []
+
+        for trace in traces:
+            if not block:
+                block.append(trace)
+                continue
+
+            previous = block[-1]
+
+            gap = (
+                trace.stats.starttime
+                - previous.stats.endtime
+                - float(previous.stats.delta)
+            )
+
+            if gap <= max_gap_sec + 1e-9:
+                block.append(trace)
+            else:
+                merged += _merge_block(block)
+                block = [trace]
+
+        if block:
+            merged += _merge_block(block)
+
+    return merged
+
+
+def prepare_stream(stream, fs, fmin, fmax, max_gap_sec=0.5):
     
     if stream is None or len(stream) == 0:
         raise ValueError("No data in stream")
@@ -19,23 +91,8 @@ def prepare_stream(stream, fs, fmin, fmax):
         raise ValueError("Maximum filter frequency must be below Nyquist frequency")
     
 
-    st = stream.copy()
-
-    # Check gaps and overlaps before merging.
-    gaps = st.get_gaps()
-
-    if gaps:
-        print(f"[preprocess] Found {len(gaps)} gaps/overlaps")
-
-        for gap in gaps:
-            print(
-                f"[preprocess] {gap[0]}.{gap[1]}.{gap[2]}.{gap[3]} "
-                f"{gap[4]} -> {gap[5]} "
-                f"gap={gap[6]} sec"
-            )
-
-    # Merge waveform segments.
-    st.merge(method=1, fill_value=0)
+    # Merge only across small gaps; keep larger gaps as separate traces.
+    st = merge_with_max_gap(stream, max_gap_sec)
 
     # Remove traces with fewer than 20 samples.
     for trace in list(st):
@@ -44,6 +101,17 @@ def prepare_stream(stream, fs, fmin, fmax):
 
     if len(st) == 0:
         raise ValueError("No usable traces after merging")
+
+    # Validate the filter band against each trace's real sampling rate. The
+    # configured fs above is only a target; stations may deliver other rates.
+    for trace in st:
+        nyquist = float(trace.stats.sampling_rate) / 2.0
+
+        if fmax >= nyquist:
+            raise ValueError(
+                f"Maximum filter frequency {fmax} Hz must be below "
+                f"Nyquist {nyquist} Hz for {trace.id}"
+            )
 
     # Remove linear trend and mean.
     st.detrend("linear")

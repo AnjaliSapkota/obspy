@@ -20,6 +20,7 @@ DETECTION_SETTINGS = {
     "fs": 100.0,
     "fmin": 1.0,
     "fmax": 8.0,
+    "max_gap_sec": 0.5,
 
     # P-wave detection
     "sta_p": 1.5,
@@ -109,4 +110,3 @@ HISTORICAL_SETTINGS = {
     "travel_max_km": 1400.0,
     "travel_step_km": 10.0,
 }
-

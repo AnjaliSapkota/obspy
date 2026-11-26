@@ -99,16 +99,6 @@ def detect_triggers(cft, component="P"):
 
 
 def process_detection(data, start_time, station_id, component):
-    """
-    Detect raw STA/LTA triggers for one waveform.
-
-    Processing:
-    1. Calculate CFT.
-    2. Find raw trigger intervals.
-    3. Calculate trigger time, duration and amplitude.
-    4. Return all Trigger objects.
-    """
-
     data = np.asarray(data, dtype=np.float64) # convert waveform data into numpy array of type float64
 
     if data.ndim != 1:
@@ -121,6 +111,11 @@ def process_detection(data, start_time, station_id, component):
 
     if not np.isfinite(fs) or fs <= 0:
         raise ValueError("Invalid sampling frequency")
+
+    min_duration_sec = float(DETECTION_SETTINGS.get("min_duration_sec", 0.0))
+
+    if not np.isfinite(min_duration_sec) or min_duration_sec < 0:
+        raise ValueError("Invalid minimum trigger duration")
 
     if not np.all(np.isfinite(data)):
         raise ValueError("Waveform data contains NaN or infinite values")
@@ -141,9 +136,14 @@ def process_detection(data, start_time, station_id, component):
         if end_idx <= start_idx:
             continue
 
-        trigger_time = start_time + start_idx / fs
-
         duration = (end_idx - start_idx) / fs
+
+        # A trigger still open at the end of the waveform has a truncated
+        # duration; keep it and let the next scan measure it fully.
+        if duration < min_duration_sec and end_idx < len(cft) - 1:
+            continue
+
+        trigger_time = start_time + start_idx / fs
 
         segment = data[start_idx:end_idx + 1]
 

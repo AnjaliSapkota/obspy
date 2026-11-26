@@ -13,13 +13,13 @@ from obspy import Stream, UTCDateTime
 from obspy.clients.seedlink.easyseedlink import EasySeedLinkClient
 
 from association import (AssociationParams, auto_max_sp_sec, build_candidates, geometry_precheck, pair_ps, prepare_picks,)
-from config import ( DETECTION_SETTINGS as D, REALTIME_SETTINGS as R, SEEDLINK_SERVER, STATIONS, WEB_HOST, WEB_PORT,)
+from config import ( DETECTION_SETTINGS as D, REALTIME_SETTINGS as R, SEEDLINK_SERVER, STATIONS, WEB_HOST, WEB_PORT)
 from detection import process_detection
 from geometry import StationGeometry
 from location import locate_event_from_picks
 from magnitude import calculate_epicentral_distance, calculate_ml
 from pickers import pick_arrival
-from preprocess import prepare_components, prepare_stream
+from preprocess import merge_with_max_gap, prepare_components, prepare_stream
 from travel_times import TravelTimeTable
 from trigger_quality import evaluate_pick_quality
 
@@ -39,6 +39,7 @@ t_table = TravelTimeTable(params.travel_depths, params.travel_max_km, params.tra
 LOCK = threading.Lock()
 BUFFERS = {}
 plt_cache = {}
+_PREPROCESS_ERRORS = {}
 STATE = {
     "connected": False,
     "pending": False,
@@ -71,6 +72,12 @@ def latest_data_time():
 
 
 # ---------------- waveform processing ----------------
+def newest_trace(traces):
+    """Newest non-empty trace, so a station recovers after a data gap."""
+    traces = [trace for trace in traces if trace.stats.npts > 0]
+    return max(traces, key=lambda trace: trace.stats.endtime) if traces else None
+
+
 def station_traces(sid, window=None):
     """Filtered Z, horizontal-envelope H and N traces for one station."""
     stream = buffer_copy(sid)
@@ -79,18 +86,25 @@ def station_traces(sid, window=None):
 
     try:
         parts = prepare_components(
-            prepare_stream(stream, fs, D["fmin"], D["fmax"])
+            prepare_stream(stream, fs, D["fmin"], D["fmax"], D["max_gap_sec"])
         )
-    except Exception:
+    except Exception as error:
+        message = str(error)
+        if _PREPROCESS_ERRORS.get(sid) != message:
+            _PREPROCESS_ERRORS[sid] = message
+            print(f"[preprocess] {sid}: {message}")
         return None
+    else:
+        _PREPROCESS_ERRORS.pop(sid, None)
 
-    if len(parts["Z"]) == 0:
+    z = newest_trace(parts["Z"])
+    if z is None:
         return None
 
     traces = {
-        "Z": parts["Z"][0],
-        "H": parts["H"][0] if parts["H"] else None,
-        "N": parts["N"][0] if len(parts["N"]) else None,
+        "Z": z,
+        "H": newest_trace(parts["H"]),
+        "N": newest_trace(parts["N"]),
     }
 
     if window:
@@ -435,9 +449,16 @@ def on_data(trace):
         stream = BUFFERS.setdefault(sid, Stream())
         stream += trace
         try:
-            stream.merge(method=1, fill_value=0)
-            newest = max(t.stats.endtime for t in stream)
-            stream.trim(starttime=newest - R["buffer"])
+            # Interpolate only short gaps; keep longer gaps as separate traces
+            # instead of fabricating samples that would trip the detector.
+            stream = merge_with_max_gap(stream, D["max_gap_sec"])
+            if len(stream) > 0:
+                newest = max(t.stats.endtime for t in stream)
+                stream.trim(starttime=newest - R["buffer"])
+            for old in list(stream):
+                if old.stats.npts == 0:
+                    stream.remove(old)
+            BUFFERS[sid] = stream
         except Exception:
             pass
         STATE["last_data"] = time.time()
