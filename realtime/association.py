@@ -161,35 +161,20 @@ class AssociationParams:
 
 def _pick_quality(pick):
 
-    snr = (
-        pick.snr
-        if pick.snr is not None
-        else float("-inf")
-    )
-
-    contrast = (
-        pick.aic_contrast
-        if pick.aic_contrast is not None
-        else float("-inf")
-    )
+    snr = (pick.snr if pick.snr is not None else float("-inf"))
+    contrast = (pick.aic_contrast if pick.aic_contrast is not None else float("-inf"))
 
     return snr, contrast
 
 
-def prepare_picks(
-    picks,
-    dedup_sec=5.0,
-) -> List[Pick]:
+def prepare_picks(picks, dedup_sec=5.0,) -> List[Pick]:
 
     if dedup_sec < 0:
-        raise ValueError(
-            "Deduplication interval cannot be negative."
-        )
+        raise ValueError("Deduplication interval cannot be negative.")
 
     grouped = {}
 
     for pick in picks:
-
         if not pick.accepted:
             continue
 
@@ -209,9 +194,7 @@ def prepare_picks(
 
     for key, station_picks in grouped.items():
 
-        station_picks.sort(
-            key=lambda pick: pick.arrival_time
-        )
+        station_picks.sort(key=lambda pick: pick.arrival_time)
 
         cluster = []
         cluster_start = None
@@ -223,46 +206,27 @@ def prepare_picks(
                 cluster_start = pick.arrival_time
                 continue
 
-            time_difference = (
-                pick.arrival_time - cluster_start
-            )
+            time_difference = (pick.arrival_time - cluster_start)
 
             if time_difference < dedup_sec:
                 cluster.append(pick)
 
             else:
-                best_pick = max(
-                    cluster,
-                    key=_pick_quality,
-                )
-
+                best_pick = max(cluster, key=_pick_quality,)
                 prepared.append(best_pick)
-
                 cluster = [pick]
                 cluster_start = pick.arrival_time
 
         if cluster:
-            best_pick = max(
-                cluster,
-                key=_pick_quality,
-            )
-
+            best_pick = max(cluster, key=_pick_quality,)
             prepared.append(best_pick)
 
-    prepared.sort(
-        key=lambda pick: pick.arrival_time
-    )
+    prepared.sort(key=lambda pick: pick.arrival_time)
 
     return prepared
 
 
-def auto_max_sp_sec(
-    geometry,
-    vp,
-    vs,
-    margin_sec=10.0,
-    cap_sec=180.0,
-):
+def auto_max_sp_sec(geometry, vp, vs, margin_sec=10.0, cap_sec=180.0,):
 
     if vs <= 0 or vp <= vs:
         raise ValueError("Velocities must satisfy vp > vs > 0.")
@@ -273,26 +237,14 @@ def auto_max_sp_sec(
     if cap_sec <= 0:
         raise ValueError("Cap must be positive.")
 
-    aperture_km = max(
-        geometry.distances.values(),
-        default=0.0,
-    )
+    aperture_km = max(geometry.distances.values(), default=0.0,)
 
     sp_slowness = (1.0 / vs) - (1.0 / vp)
 
-    return float(
-        min(
-            cap_sec,
-            aperture_km * sp_slowness + margin_sec,
-        )
-    )
+    return float(min(cap_sec,aperture_km * sp_slowness + margin_sec,))
 
 
-def pair_ps(
-    picks,
-    min_sp_sec=2.0,
-    max_sp_sec=60.0,
-):
+def pair_ps(picks, min_sp_sec=2.0, max_sp_sec=60.0,):
     """
     Pair P and S picks from the same station.
 

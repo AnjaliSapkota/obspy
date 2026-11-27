@@ -6,46 +6,21 @@ from scipy.optimize import least_squares
 from obspy import UTCDateTime
 from obspy.geodetics import gps2dist_azimuth
 
-
-def latlon_to_xy(
-    lat: float,
-    lon: float,
-    lat0: float,
-    lon0: float,
-) -> Tuple[float, float]:
-
+# projects lat/lon to a local Cartesian frame (km)
+def latlon_to_xy(lat: float, lon: float, lat0: float, lon0: float,) -> Tuple[float, float]:
     x = (lon - lon0) * 111.32 * np.cos(np.radians(lat0))
     y = (lat - lat0) * 110.574
-
     return x, y
 
 
-def xy_to_latlon(
-    x: float,
-    y: float,
-    lat0: float,
-    lon0: float,
-) -> Tuple[float, float]:
-
+def xy_to_latlon(x: float, y: float, lat0: float, lon0: float,) -> Tuple[float, float]:
     lat = lat0 + y / 110.574
     lon = lon0 + x / (111.32 * np.cos(np.radians(lat0)))
-
     return lat, lon
 
 
-def calculate_theoretical_arrival(
-    source_latitude,
-    source_longitude,
-    source_depth_km,
-    station,
-    travel_time_table,
-    phase="P",
-):
-    """
-    Calculate theoretical P or S travel time
-    between an earthquake source and a station.
-    """
-
+#   Calculate theoretical P or S travel time between an earthquake source and a station.
+def calculate_theoretical_arrival(source_latitude, source_longitude, source_depth_km, station, travel_time_table, phase="P",):
     phase = phase.upper()
 
     if phase not in ("P", "S"):
@@ -60,12 +35,7 @@ def calculate_theoretical_arrival(
     if not -180 <= source_longitude <= 180:
         raise ValueError("Invalid source longitude.")
 
-    distance_m, _, _ = gps2dist_azimuth(
-        source_latitude,
-        source_longitude,
-        station["latitude"],
-        station["longitude"],
-    )
+    distance_m, _, _ = gps2dist_azimuth(source_latitude, source_longitude, station["latitude"], station["longitude"],)
 
     distance_km = distance_m / 1000.0
 
@@ -78,53 +48,22 @@ def calculate_theoretical_arrival(
     return travel_time
 
 
-def calculate_arrival_residual(
-    observed_time,
-    theoretical_travel_time,
-    origin_time,
-):
-    """
-    Calculate observed minus predicted arrival-time residual.
-    """
-
-    theoretical_arrival = (
-        origin_time + theoretical_travel_time
-    )
-
+def calculate_arrival_residual(observed_time, theoretical_travel_time, origin_time):
+    theoretical_arrival = (origin_time + theoretical_travel_time)
     residual = observed_time - theoretical_arrival
-
     return float(residual)
 
 
-def estimate_origin_time(
-    arrival_times,
-    travel_times,
-    weights=None,
-):
-    """
-    Estimate earthquake origin time from observed arrivals
-    and theoretical travel times.
-    """
-
+def estimate_origin_time(arrival_times,travel_times,weights=None,):
     if len(arrival_times) != len(travel_times):
-        raise ValueError(
-            "Arrival times and travel times must have equal lengths."
-        )
+        raise ValueError("Arrival times and travel times must have equal lengths.")
 
     if len(arrival_times) == 0:
-        raise ValueError(
-            "At least one arrival is required."
-        )
+        raise ValueError("At least one arrival is required.")
 
-    arrival_seconds = np.asarray(
-        [arrival.timestamp for arrival in arrival_times],
-        dtype=float,
-    )
+    arrival_seconds = np.asarray([arrival.timestamp for arrival in arrival_times],dtype=float,)
 
-    travel_seconds = np.asarray(
-        travel_times,
-        dtype=float,
-    )
+    travel_seconds = np.asarray(travel_times,dtype=float,)
 
     if not np.all(np.isfinite(arrival_seconds)):
         raise ValueError("Arrival times must be finite.")
@@ -143,19 +82,12 @@ def estimate_origin_time(
     weights = np.asarray(weights, dtype=float)
 
     if len(weights) != len(origin_estimates):
-        raise ValueError(
-            "Weights must have the same length as arrivals."
-        )
+        raise ValueError("Weights must have the same length as arrivals.")
 
     if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
-        raise ValueError(
-            "Weights must be positive and finite."
-        )
+        raise ValueError("Weights must be positive and finite.")
 
-    origin_seconds = np.average(
-        origin_estimates,
-        weights=weights,
-    )
+    origin_seconds = np.average(origin_estimates,weights=weights,)
 
     return UTCDateTime(float(origin_seconds))
 

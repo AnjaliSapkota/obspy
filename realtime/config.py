@@ -105,7 +105,7 @@ HISTORICAL_SETTINGS = {
     "max_range_hours": 24,
     "max_events": 20,
     "max_triggers": 2000,
-    "max_rms": 1.5,
+    "max_rms": 3,
     "travel_depths": (10.0, 20.0, 30.0),
     "travel_max_km": 1400.0,
     "travel_step_km": 10.0,

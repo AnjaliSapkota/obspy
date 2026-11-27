@@ -7,7 +7,6 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -16,24 +15,8 @@ from flask import Flask, Response, jsonify, request
 from matplotlib.ticker import FuncFormatter
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
-
-from association import (
-    AssociationParams,
-    auto_max_sp_sec,
-    build_candidates,
-    geometry_precheck,
-    pair_ps,
-    prepare_picks,
-)
-from config import (
-    DETECTION_SETTINGS as D,
-    FDSN_TIMEOUT,
-    FDSN_URL,
-    HISTORICAL_SETTINGS as H,
-    REALTIME_SETTINGS as R,
-    STATIONS,
-    WEB_HOST,
-)
+from association import (AssociationParams, auto_max_sp_sec, build_candidates, geometry_precheck, pair_ps, prepare_picks)
+from config import (DETECTION_SETTINGS as D, FDSN_TIMEOUT, FDSN_URL, HISTORICAL_SETTINGS as H, REALTIME_SETTINGS as R, STATIONS, WEB_HOST)
 from detection import process_detection
 from geometry import StationGeometry
 from location import grid_search_location, locate_event_from_picks
@@ -44,8 +27,6 @@ from travel_times import TravelTimeTable
 from trigger_quality import evaluate_pick_quality
 
 
-# A historical job can take a while, so use a separate port from the live
-# monitor (WEB_PORT in config.py).
 FDSN_WEB_PORT = int(os.environ.get("FDSN_WEB_PORT", "8003"))
 
 EVENT_DIR = Path("fdsn_events")
@@ -152,9 +133,7 @@ def fetch_components(station, start, end):
     return prepare_components(processed)
 
 
-# ---------------------------------------------------------------------------
 # waveform helpers
-# ---------------------------------------------------------------------------
 def newest_trace(stream):
     traces = [trace for trace in stream if trace.stats.npts > 0]
     return max(traces, key=lambda trace: trace.stats.endtime) if traces else None
@@ -187,18 +166,11 @@ def pick_quality(pick):
 
 
 def pick_from_trace(trace, sid, phase, after=None, until=None, near=None, search=None):
-    """Run STA/LTA -> AIC -> quality on one trace.
-
-    Returns ``(raw_triggers, picks)``.  ``picks`` includes rejected picks so
-    the caller can decide whether to keep or display them.
-    """
     if trace is None or trace.stats.npts == 0:
         return [], []
 
     try:
-        triggers = process_detection(
-            trace.data, trace.stats.starttime, sid, phase
-        )
+        triggers = process_detection(trace.data, trace.stats.starttime, sid, phase)
     except ValueError:
         return [], []
 
@@ -270,9 +242,7 @@ def dedupe_trigger_entries(entries, gap=5.0):
     return result
 
 
-# ---------------------------------------------------------------------------
 # station scan
-# ---------------------------------------------------------------------------
 def detect_station_range(station, start, end, cancel=None):
     """Scan one station in padded chunks and return P picks and triggers."""
     sid = station_id(station)
@@ -320,9 +290,7 @@ def detect_station_range(station, start, end, cancel=None):
             for trace in vertical:
                 if trace.stats.npts < int((D["lta_p"] + D["sta_p"]) * fs):
                     continue
-                found_triggers, found_picks = pick_from_trace(
-                    trace, sid, "P", after=position, until=chunk_end
-                )
+                found_triggers, found_picks = pick_from_trace(trace, sid, "P", after=position, until=chunk_end)
                 chunk_triggers.extend(found_triggers)
                 chunk_picks.extend(found_picks)
 
@@ -379,9 +347,7 @@ def detect_station_range(station, start, end, cancel=None):
     }
 
 
-# ---------------------------------------------------------------------------
 # grouping
-# ---------------------------------------------------------------------------
 def coincidence_window(geometry):
     if not geometry.moveout_limits:
         return 30.0
@@ -773,15 +739,11 @@ def failed_event(group, start, end, error, index):
     }
 
 
-def process_candidate(job_id, group, index, geometry, params, table,
-                      start_limit, end_limit, stations):
+def process_candidate(job_id, group, index, geometry, params, table, start_limit, end_limit, stations):
     first = min(pick.arrival_time for pick in group)
     last = max(pick.arrival_time for pick in group)
     start = max(UTCDateTime(start_limit), first - float(H["pre"]))
-    end = min(
-        UTCDateTime(end_limit),
-        last + float(params.max_sp_sec) + float(H["post"]),
-    )
+    end = min(UTCDateTime(end_limit), last + float(params.max_sp_sec) + float(H["post"]),)
     if end <= start:
         end = start + 120
 
@@ -805,22 +767,11 @@ def process_candidate(job_id, group, index, geometry, params, table,
                 errors[sid] = str(error)
 
     if len(components) < 3:
-        return failed_event(
-            group, start, end,
-            "Fewer than three stations returned waveform data",
-            index,
-        )
+        return failed_event(group, start, end, "Fewer than three stations returned waveform data", index,)
 
-    initial_picks = prepare_picks(
-        [pick for pick in group if pick.station_id in components],
-        params.dedup_sec,
-    )
+    initial_picks = prepare_picks([pick for pick in group if pick.station_id in components], params.dedup_sec,)
     if len(initial_picks) < 3:
-        return failed_event(
-            group, start, end,
-            "Fewer than three triggered stations returned data",
-            index,
-        )
+        return failed_event(group, start, end, "Fewer than three triggered stations returned data", index,)
 
     lat_range, lon_range = search_box(geometry)
 
@@ -1202,10 +1153,9 @@ def build_request(payload):
     }
 
 
-# ---------------------------------------------------------------------------
 # job runner
-# ---------------------------------------------------------------------------
 def run_job(job_id):
+    # retrieve job parameters
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -1218,22 +1168,12 @@ def run_job(job_id):
 
     try:
         geometry = StationGeometry(stations=stations)
-        params = AssociationParams.from_config(
-            min_stations=min_stations,
-            max_events=max_events,
-        )
+        params = AssociationParams.from_config(min_stations=min_stations, max_events=max_events)
         params.max_sp_sec = auto_max_sp_sec(geometry, params.vp, params.vs)
         params.validate()
         table = travel_table()
 
-        job_update(
-            job_id,
-            status="running",
-            phase="detecting",
-            progress=2,
-            message=f"Scanning {len(stations)} stations",
-            error=None,
-        )
+        job_update(job_id, status="running", phase="detecting", progress=2, message=f"Scanning {len(stations)} stations", error=None,)
 
         all_picks = []
         all_triggers = []
@@ -1241,17 +1181,9 @@ def run_job(job_id):
         total = len(stations)
         completed = 0
 
-        with ThreadPoolExecutor(
-            max_workers=max(1, min(FDSN_WORKERS, total))
-        ) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(FDSN_WORKERS, total))) as pool:
             futures = {
-                pool.submit(
-                    detect_station_range,
-                    station,
-                    start,
-                    end,
-                    lambda: is_cancelled(job_id),
-                ): station
+                pool.submit(detect_station_range, station, start, end, lambda: is_cancelled(job_id), ): station
                 for station in stations
             }
 
@@ -1294,22 +1226,13 @@ def run_job(job_id):
                     break
 
         if is_cancelled(job_id):
-            job_update(
-                job_id, status="cancelled", phase="cancelled",
-                message="Cancelled", progress=min(60.0, 2 + 50.0),
-            )
+            job_update(job_id, status="cancelled", phase="cancelled",message="Cancelled", progress=min(60.0, 2 + 50.0),)
             return
 
-        job_update(
-            job_id,
-            phase="grouping",
-            progress=54,
-            message="Grouping station picks into candidate events",
-        )
+        job_update(job_id, phase="grouping", progress=54, message="Grouping station picks into candidate events",)
 
-        grouping_picks = prepare_picks(
-            all_picks, max(float(params.dedup_sec), float(D["dead_time_sec"]))
-        )
+        grouping_picks = prepare_picks(all_picks, max(float(params.dedup_sec), float(D["dead_time_sec"]))
+)
         groups = group_picks(
             grouping_picks,
             geometry,
@@ -1327,10 +1250,7 @@ def run_job(job_id):
 
         groups = groups[:max_events]
         if not groups:
-            job_update(
-                job_id, status="done", phase="done", progress=100,
-                message="Completed - no candidate events found",
-            )
+            job_update(job_id, status="done", phase="done", progress=100, message="Completed - no candidate events found")
             return
 
         for index, group in enumerate(groups):
@@ -1345,26 +1265,12 @@ def run_job(job_id):
             )
 
             try:
-                event = process_candidate(
-                    job_id,
-                    group,
-                    index,
-                    geometry,
-                    params,
-                    table,
-                    start,
-                    end,
-                    stations,
-                )
+                event = process_candidate(job_id, group, index, geometry, params, table, start, end, stations,)
             except Exception as error:
-                event = failed_event(
-                    group, start, end, f"Event processing failed: {error}", index
-                )
+                event = failed_event(group, start, end, f"Event processing failed: {error}", index)
 
             if event is None:
-                event = failed_event(
-                    group, start, end, "Event processing returned no result", index
-                )
+                event = failed_event(group, start, end, "Event processing returned no result", index)
 
             with JOBS_LOCK:
                 current = JOBS.get(job_id)
@@ -1373,16 +1279,10 @@ def run_job(job_id):
 
             save_event(job_id, event)
 
-            job_update(
-                job_id,
-                progress=60 + 36.0 * (index + 1) / max(1, len(groups)),
-            )
+            job_update(job_id, progress=60 + 36.0 * (index + 1) / max(1, len(groups)),)
 
         if is_cancelled(job_id):
-            job_update(
-                job_id, status="cancelled", phase="cancelled",
-                message="Cancelled",
-            )
+            job_update(job_id, status="cancelled", phase="cancelled", message="Cancelled",)
             return
 
         with JOBS_LOCK:
@@ -1419,7 +1319,6 @@ def run_job(job_id):
         save_job(job_id)
 
 
-# ---------------------------------------------------------------------------
 # website
 # ---------------------------------------------------------------------------
 PAGE_HEAD = """<!doctype html>
@@ -2082,16 +1981,8 @@ def trim_jobs():
 
 
 def main():
-    print(f"Historical FDSN detection: http://127.0.0.1:{FDSN_WEB_PORT}/")
-    print(f"FDSN service: {FDSN_URL}")
     travel_table()
-    app.run(
-        host=WEB_HOST,
-        port=FDSN_WEB_PORT,
-        debug=False,
-        use_reloader=False,
-        threaded=True,
-    )
+    app.run(host=WEB_HOST, port=FDSN_WEB_PORT, debug=False, use_reloader=False, threaded=True,)
 
 
 if __name__ == "__main__":
